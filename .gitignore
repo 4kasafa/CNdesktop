@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Runtime (jangan commit DB/token lokal)
+data/*.db
+data/auth.json
+
+# Build
+dist/
+build/
+*.spec
