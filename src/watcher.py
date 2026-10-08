@@ -77,12 +77,35 @@ class Watcher:
     def on_dialog_open(self, hwnd, main_hwnd):
         if hwnd not in self.sessions:
             self.sessions[hwnd] = {"main": main_hwnd, "snap": {}, "phase": "open",
-                                   "deadline": 0.0, "last_read": 0.0}
+                                    "deadline": 0.0, "last_read": 0.0, "last_no": ""}
 
     def on_dialog_close(self, hwnd):
         s = self.sessions.pop(hwnd, None)
-        if s and s["phase"] == "burst":
+        if not s:
+            return
+        if s["phase"] == "burst":
             log.warning("needs_review: dialog hilang saat burst hwnd=%s", hwnd)
+            return
+        # fallback Simpan: dialog hilang tanpa INVOKED (hook mati?) tapi no
+        # sudah angka -> anggap Simpan terjadi. Masih Auto (= Batal) -> discard.
+        try:
+            fresh = self.read_dialog(hwnd)
+            for k, v in fresh.items():
+                if v:
+                    s["snap"][k] = v
+        except Exception:
+            pass
+        try:
+            no = self.read_no(s["main"])
+        except Exception:
+            no = ""
+        num = parse_nominal(no) if no and no != "Auto" else None
+        if num is None and s.get("last_no"):
+            num = s["last_no"]  # ponytail: no sudah ke-clear saat deteksi tutup
+        if num is None:
+            return
+        log.info("simpan via tutup-dialog hwnd=%s no=%s", hwnd, num)
+        self._save(hwnd, s, num)
 
     def on_invoked(self, hwnd):
         s = self.sessions.get(hwnd)
@@ -96,22 +119,26 @@ class Watcher:
         s["deadline"] = self.clock() + BURST_MAX
 
     # ---- kerja periodik ----
+    def _save(self, hwnd, s, num):
+        """Klasifikasi + INSERT dari snap. Dipakai burst maupun tutup-dialog."""
+        total = parse_nominal((s["snap"].get("total_raw") or ""))
+        tunai = parse_nominal((s["snap"].get("tunai_raw") or ""))
+        debit = parse_nominal((s["snap"].get("debit_raw") or ""))
+        bank = (s["snap"].get("bank_raw") or "").strip()
+        kat = classify(total, tunai, debit, bank)
+        if kat == "needs_review" or not total:
+            log.warning("needs_review: data tak lengkap hwnd=%s kat=%s", hwnd, kat)
+        else:
+            t, n = (total, 0) if kat == "Tunai" else (0, total) if kat == "Nontunai" else (tunai, debit)
+            rowid = insert_tx(self.db, str(num), total, t, n, bank, kat)
+            log.info("saved id=%s no=%s kat=%s", rowid, num, kat)
+        self.sessions.pop(hwnd, None)
+
     def _finish_burst(self, hwnd, s):
         no = self.read_no(s["main"])
         num = parse_nominal(no) if no and no != "Auto" else None
         if num:
-            total = parse_nominal((s["snap"].get("total_raw") or ""))
-            tunai = parse_nominal((s["snap"].get("tunai_raw") or ""))
-            debit = parse_nominal((s["snap"].get("debit_raw") or ""))
-            bank = (s["snap"].get("bank_raw") or "").strip()
-            kat = classify(total, tunai, debit, bank)
-            if kat == "needs_review" or not total:
-                log.warning("needs_review: data tak lengkap hwnd=%s kat=%s", hwnd, kat)
-            else:
-                t, n = (total, 0) if kat == "Tunai" else (0, total) if kat == "Nontunai" else (tunai, debit)
-                rowid = insert_tx(self.db, str(num), total, t, n, bank, kat)
-                log.info("saved id=%s no=%s kat=%s", rowid, num, kat)
-            self.sessions.pop(hwnd, None)
+            self._save(hwnd, s, num)
             return True
         if self.clock() >= s["deadline"]:
             log.warning("needs_review: timeout 5 dtk hwnd=%s", hwnd)
@@ -131,6 +158,12 @@ class Watcher:
                             s["snap"] = self.read_dialog(hwnd)
                         except Exception as e:
                             log.debug("read gagal hwnd=%s: %r", hwnd, e)
+                        try:  # ponytail: ingat no numerik terakhir (tutupan fallback)
+                            no = self.read_no(s["main"])
+                            if no and no != "Auto" and parse_nominal(no):
+                                s["last_no"] = parse_nominal(no)
+                        except Exception:
+                            pass
                 elif s["phase"] == "burst":
                     try:
                         self._finish_burst(hwnd, s)
@@ -171,6 +204,11 @@ class Watcher:
     def _event(self, _hook, event, hwnd, _obj, _child, _tid, _time):
         try:
             if event == EV_INVOKED:
+                try:
+                    if get_window_process_name(hwnd).lower() == KETOKO_PROCESS_NAME.lower():
+                        log.info("invoked (hook) hwnd=%s obj=%s", hwnd, _obj)
+                except Exception:
+                    pass
                 self.on_invoked(hwnd)
                 return
             proc_ok = get_window_process_name(hwnd).lower() == KETOKO_PROCESS_NAME.lower()
@@ -178,10 +216,12 @@ class Watcher:
                 return
             title = _title(hwnd)
             if event in (EV_CREATE, EV_SHOW) and title == "Pembayaran":
+                log.info("dialog terbuka (hook) hwnd=%s", hwnd)
                 main = next((h for h, t in self.enum()
                              if KETOKO_WINDOW_TITLE.lower() in t.lower()), 0)
                 self.on_dialog_open(hwnd, main)
             elif event in (EV_DESTROY, EV_HIDE) and hwnd in self.sessions:
+                log.info("dialog tutup (hook) hwnd=%s", hwnd)
                 self.on_dialog_close(hwnd)
         except Exception as e:
             log.debug("hook event gagal: %r", e)
@@ -195,6 +235,8 @@ class Watcher:
         hook = ctypes.windll.user32.SetWinEventHook(
             EV_CREATE, EV_INVOKED, 0, self._proc, 0, 0,
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS)
+        if not hook:
+            log.error("SetWinEventHook gagal (NULL): hanya fallback enum 5 dtk aktif")
         self._run = True
         threading.Thread(target=self._worker, daemon=True).start()
         try:

@@ -51,6 +51,26 @@ def test_timeout_discards(caplog):
     assert "needs_review" in caplog.text
 
 
+def test_close_with_number_saves():
+    """Tutup-dialog + no sudah angka (hook INVOKED mati) -> tetap tersimpan."""
+    w = _watcher(nos={"m1": ["9001"]})
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    rows = list_since(w.db)
+    assert len(rows) == 1 and rows[0]["no_transaksi"] == "9001"
+
+
+def test_close_auto_discards_silent(caplog):
+    """Tutup-dialog + masih Auto (= Batal) -> discard tanpa warning."""
+    w = _watcher()
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    with caplog.at_level(logging.WARNING, logger="cndesktop"):
+        w.on_dialog_close(111)
+    assert list_since(w.db) == [] and "needs_review" not in caplog.text
+
+
 def test_close_without_save():
     w = _watcher()
     w.on_dialog_open(111, "m1")

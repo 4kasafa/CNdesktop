@@ -133,6 +133,7 @@ class Dashboard:
         ttk.Button(bot, text="Terapkan", command=self.apply_port).pack(side="left")
         ttk.Button(bot, text="Test Baca UIA", command=self.run_test).pack(side="left", padx=8)
         ttk.Button(bot, text="Refresh", command=self.refresh).pack(side="left")
+        ttk.Button(bot, text="Buka Log", command=self.open_log).pack(side="left", padx=8)
         self.txt_test = tk.Text(self.root, height=5)
         self.txt_test.pack(fill="x", padx=8, pady=(0, 8))
 
@@ -149,6 +150,14 @@ class Dashboard:
         self.root.title(f"CNdesktop :{new}")
         if self.on_port_change:
             self.on_port_change(new)
+
+    def open_log(self):
+        import os
+        from src.config import LOG_FILE, LOG_SUBDIR, app_dir
+        try:
+            os.startfile(os.path.join(app_dir(), LOG_SUBDIR, LOG_FILE))
+        except Exception:
+            pass  # ponytail: tombol diagnosis, gagal diam-diam
 
     def run_test(self):
         try:
