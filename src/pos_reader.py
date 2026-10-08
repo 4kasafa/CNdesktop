@@ -156,23 +156,53 @@ def read_dialog(hwnd: int) -> dict:
                     out["tunai_raw"] = _raw(t)
             except Exception:
                 pass
-            # Bank dulu: ComboBoxEdit dekat (1014,565,1139,607)
+            # Bank: combo yang BERNILAI (sudah dipilih) + sebaris Edit
+            # nominal di kirinya. Tanpa koordinat absolut (tahan resolusi/DPI
+            # beda, mis. kasir 1366x768 vs dev 1080p).
             bank_top = None
             for cb in _iter_combos(dlg):
                 try:
                     if not cb.Exists(0.5, 0.5):
                         continue
+                    val = _raw(cb)
+                    if not val:
+                        continue
                     r = cb.BoundingRectangle
-                    if abs(r.left - 1014) < 80 and abs(r.top - 565) < 40:
-                        out["bank_raw"] = _raw(cb)
+                    left = None
+                    for e in _iter_edits(dlg):
+                        try:
+                            er = e.BoundingRectangle
+                            if e.ClassName == KETOKO_EDIT_CLASS \
+                                    and abs(er.top - r.top) <= 8 \
+                                    and er.right <= r.left:
+                                left = e
+                                break
+                        except Exception:
+                            continue
+                    if left is not None:
+                        out["bank_raw"] = val
+                        out["debit_raw"] = _raw(left)
                         bank_top = r.top
                         break
                 except Exception:
                     continue
+            if not out["bank_raw"]:
+                # fallback: posisi absolut sesi inspect (1080p)
+                for cb in _iter_combos(dlg):
+                    try:
+                        if not cb.Exists(0.5, 0.5):
+                            continue
+                        r = cb.BoundingRectangle
+                        if abs(r.left - 1014) < 80 and abs(r.top - 565) < 40:
+                            out["bank_raw"] = _raw(cb)
+                            bank_top = r.top
+                            break
+                    except Exception:
+                        continue
             # Debit: Edit sebaris combo bank. ponytail: dump live membuktikan
             # nominal di field tanpa-aid sebaris bank; tByrKredit = baris
             # tender lain (nilainya 0) -> jangan dipakai sebagai sumber debit.
-            if bank_top is not None:
+            if bank_top is not None and not out["debit_raw"]:
                 for e in _iter_edits(dlg):
                     try:
                         if e.ClassName == KETOKO_EDIT_CLASS and abs(_rect_top(e) - bank_top) <= 5:
