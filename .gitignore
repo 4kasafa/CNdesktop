@@ -11,4 +11,8 @@ data/auth.json
 # Build
 dist/
 build/
+docs/
 *.spec
+
+
+.agents

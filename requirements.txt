@@ -1,0 +1,3 @@
+uiautomation
+pystray
+pyinstaller  # build-only (Fase 6: CNdesktop.exe windowed)

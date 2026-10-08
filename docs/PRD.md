@@ -1,91 +1,118 @@
-# PRD — Desktop Connector (repo BARU, mis. `CNdesktop`)
+# PRD — CNdesktop (Connector Kasir Ketoko)
 
-> Repo `cash_note` yang sekarang TIDAK diubah — tetap jadi referensi + sumber copy-paste.
-> Repo baru ini: Python, tray-only, tanpa window utama.
+## 0. Referensi
 
-## 1. Latar & tujuan
+* Sumber kebenaran: `D:\Desktop\projects\cash_note` — JANGAN edit sumber.
+* Copy POS: `docs/pos.md` (konstanta, `pos_reader.py`, pola hotkey F10).
+* Locator UIA: `docs/pos_inspect.md:16-28` (dipakai verbatim).
+* App target: `KetokoD.exe` — `Ketoko.co.id Desktop v2.3.1.0`, WPF + DevExpress v16.2.
+* Gap wajib inspect ulang sebelum watcher final: field `Total Bayar` (hijau), `Kembali` (oranye), `AutomationId` tombol `Simpan` polos, modal "simpan berhasil" + timing clear.
 
-PC kasir butuh penghubung yang hidup di background: baca otomatis window pembayaran Ketoko (UIA), simpan ke SQLite, layani 1 HP via WiFi (live data + print), tanpa ganggu kasir (no taskbar, no console, autostart).
+## 1. Tujuan & Kriteria
 
-Non-tujuan: tidak ada UI kasir lengkap (itu tetap di repo lama), HP tidak edit transaksi, tidak ada Bluetooth print, tidak ada multi-device.
+1. Berjalan di background, tanpa taskbar/console, hanya tray-icon.
+2. Fungsi utama: membaca data pembayaran Ketoko dan menentukan metode (Tunai / Nontunai / Split).
+3. Simpan sementara di SQLite sebelum diambil HP (WiFi/LAN sama, 1 HP).
+4. Dashboard hanya dibuka via tray-icon, isi minimal.
+5. Read-only UIA: tidak klik/fokus `ButBayar` otomatis, tidak mencuri foreground kasir.
 
-## 2. Keputusan kunci (locked)
+Keputusan user (final): kategori hanya Tunai/Nontunai/Split; trigger sah = `Simpan` polos + `Simpan+Cetak`; HP polling; dashboard minimal; tidak auto-print thermal.
 
-- Auto-save langsung tiap nominal baru (tanpa konfirmasi HP).
-- Printer thermal USB hanya di PC; HP cuma `POST /api/print`.
-- 1 PC + 1 HP → pairing PIN→token sekali + QR (`http://IP:8765 + token`), tanpa mDNS.
-- Server HTTP pakai **stdlib `http.server`** (tanpa Flask/FastAPI).
-- UIA level: samakan elevated/non-elevated dengan KetokoD.exe (verifikasi di mesin toko).
-
-## 3. Struktur file repo baru
+## 2. Arsitektur
 
 ```
-CNdesktop/
-  README.md                      # cara install, pairing HP, troubleshooting
-  requirements.txt               # uiautomation, pywin32, pystray, pillow, pyinstaller (+ qrcode)
-  installer.iss                  # Inno Setup: autostart, firewall port 8765, admin-manifest opsional
-  cashnote.ico
-  src/
-    main.py                      # entrypoint: init db → watcher thread → api thread → tray mainloop
-    config.py                    # DB_PATH, API_PORT=8765, PC_ID, GAS_URL (copy constants.py:25 repo lama)
-    pos_reader.py                # COPY dari repo lama + tambah field dialog pembayaran (butuh Inspect.exe)
-    watcher.py                   # polling EnumWindows 500ms → is_ketoko_window → read → debounce → insert
-    db.py                        # connect (WAL), create schema, insert/query transactions + print_jobs
-    migrate_json_to_sqlite.py    # one-shot: data_*.json repo lama → transactions (source='import')
-    server.py                    # routes health/transactions/totals/print, cek token
-    auth.py                      # buat PIN 6-digit sekali → tukar token, simpan token hash
-    printer.py                   # worker antrean print_jobs → ESC/POS via win32print (COPY builder
-                                 #   build_escpos_receipt/generate_receipt_text dari calculate_tab.py:581-667)
-    tray.py                      # pystray: menu Buka QR-IP / Keluar; (QR: window mini atau PNG dibuka viewer)
-  data/                          # RUNTIME, gitignored: cashnote.db, auth.json
-  tests_smoke.py                 # assert-based: db insert+query, api health+print (tanpa framework)
+KetokoD.exe (WPF)
+  └─ Dialog "Pembayaran" (IsDialog=1, top-level, hwnd != main)
+       └─ WinEventHook (ctypes, stdlib) → watcher.py → SQLite (data.db)
+                                                        └─ http.server LAN → HP (polling)
+                                                        └─ tray-icon → dashboard lokal
 ```
 
-Copy dari repo lama (referensi, jangan import lintas repo):
-- `pos_reader.py` utuh (`read_ketoko_value`, `click_butbayar`, `is_ketoko_window`).
-- `GAS_URL_KASIR` 1 baris (`constants.py:25`) — untuk jaga-jaga, HP yang utama pakai GAS.
-- Rumus `total_kurang/total_lebih` (`gas_service.py:76-94`) untuk `/api/totals`.
-- `format_rupiah` + builder struk ESC/POS (`tabs/kasir_tab.py:15-22`, `tabs/calculate_tab.py:581-667`).
+* Idle 99%: `SetWinEventHook` — `EVENT_OBJECT_CREATE/SHOW` filter `Name="Pembayaran"` + PID `KetokoD.exe` = mulai; `HIDE/DESTROY` = batal/ditutup; `EVENT_OBJECT_INVOKED` pada `ButSimpanCetak` + `Simpan` polos = trigger save. Idle ~0% CPU, ~30-50MB RAM.
+* Dilarang polling idle 500ms. Pengaman saja: `EnumWindows` tiap 5 detik jika hook miss (WPF obfuscated).
+* Aktif singkat (dialog terbuka saja): baca UIA tiap 250ms — Total kuning, `tBayarTunai`, field Debit, ComboBank.
+* Burst pasca-save saja: poll `tNoTransaksi` tiap 100ms × maks 5 dtk sampai `Auto → angka`, lalu save dan kembali idle.
+* Stack: Python stdlib (`ctypes`, `sqlite3`, `http.server`) + `uiautomation` (reuse `pos_reader.py` dari `docs/pos.md`) + satu dep tray (`pystray`). Autostart via Startup folder.
 
-## 4. Skema SQLite (`data/cashnote.db`, WAL)
+## 3. Locator UIA (dari `pos_inspect.md`)
+
+| Elemen | Locator | Pola baca |
+|---|---|---|
+| Window utama | `AutomationId="MainWindow"` / judul `Ketoko.co.id Desktop` | anchor |
+| No Transaksi | parent `aid="tNoTransaksi"` (bukan inner `PART_Editor`) | `ValuePattern`: `Auto` → angka |
+| Total dialog (kuning) | `ClassName="l11illlII111I"` tanpa aid, Edit pertama/terbesar di dialog | `ValuePattern` |
+| Bayar Tunai | `AutomationId="tBayarTunai"` | `ValuePattern` |
+| Kartu Debit (nominal) | tanpa aid, Edit di `Top:565` sejajar combo Bank | `ValuePattern`, fallback posisi |
+| Combo Bank Debit | `ClassName="ComboBoxEdit"` di `(1014,565,1139,607)` | `ValuePattern` (opsional) |
+| Simpan + Cetak | `AutomationId="ButSimpanCetak"` | `Invoke` — deteksi saja |
+| Simpan polos | aid menyusul (gap inspect) | `Invoke` — deteksi saja |
+| Grid item `GrdCtrl` | 0 anak, tidak terekspos | DITUTUP: item tidak diambil via UIA |
+
+Parsing nominal: `Rp 150.000,00 → 150000` (strip `,\d{1,2}$`, ambil digit, tolak string berisi `/` atau `:` (tanggal/jam), tolak `0`). Match exact, toleransi 0.
+
+## 4. Alur sistem
+
+1. Dialog `Pembayaran` muncul → snapshot Total final (bukan total berjalan kasir; total kasir `ClassName=l11illlII111I` di main hanya untuk konteks).
+2. Baca `ComboBank.Value`: kosong dan field Debit `0`/kosong → kandidat Tunai. Ada isi → baca nominal Debit.
+3. `debit == total` → Nontunai. `debit < total` → baca `tBayarTunai`; jika `debit + tunai == total` → Split.
+4. Tunai murni: simpan Total saja, abaikan input tunai (kembalian tidak disimpan).
+5. Tunggu `INVOKED Simpan` / `Simpan+Cetak` → burst-poll No Transaksi sampai angka.
+6. Lengkap (Total + kategori + No Transaksi angka) → `INSERT`. Timeout 5 dtk / dialog hilang duluan / data tak lengkap → discard + log `needs_review`, tanpa save separuh.
+7. HP polling periodik dan mengambil transaksi baru (repo HP terpisah).
+
+Pseudocode klasifikasi:
+
+```
+total = parse(total_raw)
+debit = parse(debit_raw) if bank else 0
+if not bank and debit == 0: kategori = "Tunai"
+elif debit == total: kategori = "Nontunai"
+elif debit + parse(tunai_raw) == total: kategori = "Split"
+else: needs_review (jangan save)
+```
+
+## 5. SQLite
+
+File: `%APPDATA%/CNdesktop/data.db`. Tanpa hapus otomatis (retensi tunda).
 
 ```sql
-transactions(id INTEGER PK, amount INTEGER NOT NULL, category TEXT NOT NULL DEFAULT 'Cash',
-  label INTEGER, ts TEXT NOT NULL, source TEXT NOT NULL);  -- source: pos|manual|import
-print_jobs(id INTEGER PK, payload_json TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'queued', ts TEXT NOT NULL); -- queued|done|failed + pesan di payload
-auth(token_hash TEXT PRIMARY KEY, created TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS transactions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  no_transaksi TEXT UNIQUE NOT NULL,
+  total INTEGER NOT NULL,
+  tunai INTEGER NOT NULL DEFAULT 0,
+  nontunai INTEGER NOT NULL DEFAULT 0,
+  bank TEXT DEFAULT '',
+  kategori TEXT NOT NULL CHECK(kategori IN ('Tunai','Nontunai','Split')),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
 ```
 
-Anti-duplikat watcher: cek `(amount, ts-menit, source='pos')` atau kolom `dedup_key` bila perlu.
+Idempoten via `UNIQUE(no_transaksi)` — double `INVOKED` tidak duplikat. Multi-dialog: satu transaksi per `hwnd`.
 
-## 5. Kontrak LAN API (port 8765, header `X-Token`)
+## 6. API LAN (HP polling, tanpa auth)
 
-| Method & path | Req | Res |
-|---|---|---|
-| `GET /api/health` | — | `{ok:true, pc_id, time}` |
-| `GET /api/transactions?since_id=N` | — | `{data:[{id,amount,category,label,ts}], last_id}` |
-| `GET /api/totals` | — | `{total_transaksi, total_kurang, total_lebih}` |
-| `POST /api/print` | `{type:'receipt', transaction_ids:[...]}` atau `{type:'text', text}` | `{job_id}` |
-| `GET /api/print/:id` | — | `{status}` (opsional, boleh skip — HP polling ulang) |
-| `POST /api/pair` | `{pin}` | `{token}` (sekali saja) |
+Alasan: 1 HP, LAN sama, malas dulu. Risiko dicatat: siapa pun di LAN bisa baca nominal — tambah token jika toko komplain.
 
-## 6. Alur runtime
+* Bind `0.0.0.0:8765`, IP:port tampil di tooltip tray.
+* `GET /api/health → {"ok":true}`
+* `GET /api/transactions?since=<id>&limit=50 → [{id,no_transaksi,total,tunai,nontunai,bank,kategori,created_at}] ORDER BY id ASC`
 
-1. Boot → tray muncul, watcher polling 500ms, API listen `0.0.0.0:8765`.
-2. Dialog pembayaran Ketoko muncul + nominal berubah & >0 → insert `transactions(source='pos')`.
-3. HP polling `since_id` tiap 2 detik → list live.
-4. HP print → row `print_jobs queued` → worker cetak → `done/failed` (gagal tercatat, tampil di HP).
-5. Pairing: kasir klik tray → tampil PIN 6 digit (sekali pakai, kedaluwarsa 5 mnt) + QR berisi IP+token → HP scan → simpan token.
+## 7. Dashboard (tray-only, minimal)
 
-## 7. Acceptance
+Dibuka via double-click / right-click tray. Isi: status watcher (jalan/mati), Ketoko terdeteksi/tidak, No Transaksi terakhir, tabel 20 transaksi terakhir, setting port, tombol `Test Baca UIA`. Ditutup = hide, bukan exit. Exit hanya via menu `Keluar`. Tanpa laporan/reprint/hapus-edit.
 
-- [ ] `setup.exe` → restart → hanya tray (no taskbar/console).
-- [ ] Nominal pembayaran Ketoko masuk DB <1 dtk tanpa sentuh apa pun.
-- [ ] `curl` dari HP: health + transactions + totals OK; print keluar struk fisik.
-- [ ] Data lama (JSON repo lama) terbaca setelah migrasi.
-- [ ] `tests_smoke.py` hijau.
+## 8. Print thermal USB
 
-## 8. Milestone
+Out of scope. Tidak ada auto-print. Data hanya disiapkan di SQLite + API untuk HP/dashboard reprint nanti.
 
-M1 ekstrak+copy modul (Fase 0) → M2 sqlite+migrasi → M3 watcher (butuh Inspect.exe dialog pembayaran) → M4 tray+installer → M5 LAN API+pairing → uji di mesin toko.
+## 9. Edge & Non-fungsional
+
+* Windows 10/11 x64, Ketoko `v2.3.1.0`. Gagal baca UIA = silent + log, jangan crash/block kasir (pola `pos_reader.py`: tidak pernah raise dari thread background).
+* Batal (dialog hilang tanpa save) = discard. Multi-dialog = antre per `hwnd` dengan kunci sederhana.
+* Beban: idle ~0% CPU; burst baca hanya saat dialog terbuka / 5 dtk pasca-save.
+* Deposit/Kredit/E-Money di luar scope (kasir hanya pakai Tunai + Debit).
+
+## 10. Acceptance
+
+PRD lengkap jika §2–§7 terimplementasi: hook idle + burst-poll 100ms×5s, klasifikasi §4, skema §5, 2 endpoint §6, dashboard §7. Verifikasi: 1× transaksi Tunai + 1× Nontunai + 1× Split terbaca benar + `since` HP tidak duplikat + idle CPU ~0%.
