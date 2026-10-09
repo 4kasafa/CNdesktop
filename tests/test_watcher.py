@@ -133,6 +133,17 @@ def test_close_watch_late_number_saves():
     assert len(rows) == 1 and rows[0]["no_transaksi"] == "9001"
 
 
+def test_close_watch_formatted_no_saves_both():
+    """No dokumen format kasir -> tersimpan utuh + counter benar."""
+    w = _watcher(nos={"m1": ["Auto"] * 10 + ["001519/KSR/SURJO/1026"] * 60})
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    _run(w, steps=60)
+    r = list_since(w.db)[0]
+    assert r["no_transaksi"] == "001519/KSR/SURJO/1026" and r["no_urut"] == "001519"
+
+
 def test_no_transition_logged(caplog):
     """Transisi Auto->angka->Auto tercatat di log (peta timing nomor)."""
     w = _watcher(nos={"m1": ["Auto", "Auto", "9001", "Auto", "Auto"]})

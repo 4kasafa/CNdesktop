@@ -83,9 +83,15 @@ def last_20(db_path: str) -> list[dict]:
     try:
         with sqlite3.connect(db_path) as c:
             c.row_factory = sqlite3.Row
-            return [dict(r) for r in c.execute(
-                "SELECT id,no_transaksi,total,tunai,nontunai,bank,kategori,created_at"
-                " FROM transactions ORDER BY id DESC LIMIT 20")]
+            try:
+                rows = c.execute(
+                    "SELECT id,no_transaksi,no_urut,total,tunai,nontunai,bank,kategori,created_at"
+                    " FROM transactions ORDER BY id DESC LIMIT 20")
+            except sqlite3.OperationalError:  # ponytail: DB skema lama pra-v1.1.0
+                rows = c.execute(
+                    "SELECT id,no_transaksi,total,tunai,nontunai,bank,kategori,created_at"
+                    " FROM transactions ORDER BY id DESC LIMIT 20")
+            return [dict(r) for r in rows]
     except Exception:
         return []
 
@@ -117,7 +123,7 @@ class Dashboard:
 
         tbl = ttk.Frame(self.root, padding=(8, 0))
         tbl.pack(fill="both", expand=True)
-        cols = ("id", "no", "total", "tunai", "nontunai", "bank", "kategori", "created_at")
+        cols = ("id", "no", "urut", "total", "tunai", "nontunai", "bank", "kategori", "created_at")
         self.tree = ttk.Treeview(tbl, columns=cols, show="headings", height=12)
         for c in cols:
             self.tree.heading(c, text=c)
@@ -185,7 +191,7 @@ class Dashboard:
             self.tree.delete(r)
         for t in last_20(self.db_path):
             self.tree.insert("", "end", values=(
-                t["id"], t["no_transaksi"], t["total"], t["tunai"],
+                t["id"], t["no_transaksi"], t.get("no_urut", ""), t["total"], t["tunai"],
                 t["nontunai"], t["bank"], t["kategori"], t["created_at"]))
 
     # ponytail: after(0) agar aman dipanggil dari thread tray-icon

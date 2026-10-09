@@ -13,7 +13,7 @@ from ctypes import wintypes
 from src.classify import classify
 from src.config import BURST_EVERY, BURST_MAX, ENUM_EVERY, READ_EVERY
 from src.db import init_db, insert_tx
-from src.parse import parse_nominal
+from src.parse import parse_no_transaksi, parse_nominal
 from src.pos_reader import (
     KETOKO_PROCESS_NAME,
     KETOKO_WINDOW_TITLE,
@@ -69,7 +69,7 @@ class Watcher:
         self.read_no = read_no_fn or read_no_transaksi
         self.enum = enum_fn or _enum_ketoko
         self.clock = clock or time.monotonic
-        self.sessions = {}  # hwnd -> {main, snap, phase, deadline, last_read}
+        self.sessions = {}  # hwnd -> {main, snap, phase, deadline, last_read, last_no, last_urut, prev_no}
         self._last_enum = 0.0
         self._run = False
 
@@ -107,15 +107,15 @@ class Watcher:
         except Exception:
             no = ""
         log.info("tutup hwnd=%s main=%s no=%r last_no=%r", hwnd, s["main"], no, s.get("last_no"))
-        num = parse_nominal(no) if no and no != "Auto" else None
-        if num is None and s.get("last_no"):
-            num = s["last_no"]  # ponytail: no sudah ke-clear saat deteksi tutup
-        if num is not None:
-            log.info("simpan via tutup-dialog hwnd=%s no=%s", hwnd, num)
-            self._save(hwnd, s, num)
+        doc_id, counter = parse_no_transaksi(no)
+        if doc_id is None and s.get("last_no"):
+            doc_id, counter = s["last_no"], s.get("last_urut", "")  # no ke-clear saat tutup
+        if doc_id is None:
+            s["phase"] = "closed-watch"  # T3: poll nomor 5 dtk pasca-tutup
+            s["deadline"] = self.clock() + BURST_MAX
             return
-        s["phase"] = "closed-watch"  # T3: poll nomor 5 dtk pasca-tutup
-        s["deadline"] = self.clock() + BURST_MAX
+        log.info("simpan via tutup-dialog hwnd=%s no=%s", hwnd, doc_id)
+        self._save(hwnd, s, doc_id, counter)
 
     def on_invoked(self, hwnd):
         s = self.sessions.get(hwnd)
@@ -129,7 +129,7 @@ class Watcher:
         s["deadline"] = self.clock() + BURST_MAX
 
     # ---- kerja periodik ----
-    def _save(self, hwnd, s, num):
+    def _save(self, hwnd, s, doc_id, counter):
         """Klasifikasi + INSERT dari snap. Dipakai burst maupun tutup-dialog."""
         total = parse_nominal((s["snap"].get("total_raw") or ""))
         tunai = parse_nominal((s["snap"].get("tunai_raw") or ""))
@@ -140,18 +140,17 @@ class Watcher:
             log.warning("needs_review: data tak lengkap hwnd=%s kat=%s", hwnd, kat)
         else:
             t, n = (total, 0) if kat == "Tunai" else (0, total) if kat == "Nontunai" else (tunai, debit)
-            rowid = insert_tx(self.db, str(num), total, t, n, bank, kat)
+            rowid = insert_tx(self.db, doc_id, total, t, n, bank, kat, no_urut=counter)
             if rowid is None:
-                log.info("duplikat no=%s (abaikan)", num)
+                log.info("duplikat no=%s (abaikan)", doc_id)
             else:
-                log.info("saved id=%s no=%s kat=%s", rowid, num, kat)
+                log.info("saved id=%s no=%s urut=%s kat=%s", rowid, doc_id, counter, kat)
         self.sessions.pop(hwnd, None)
 
     def _finish_burst(self, hwnd, s):
-        no = self.read_no(s["main"])
-        num = parse_nominal(no) if no and no != "Auto" else None
-        if num:
-            self._save(hwnd, s, num)
+        doc_id, counter = parse_no_transaksi(self.read_no(s["main"]))
+        if doc_id:
+            self._save(hwnd, s, doc_id, counter)
             return True
         if self.clock() >= s["deadline"]:
             log.warning("needs_review: timeout 5 dtk hwnd=%s", hwnd)
@@ -179,17 +178,17 @@ class Watcher:
                             elif no != prev:
                                 log.info("no_transaksi main=%s %r -> %r", s["main"], prev, no)
                                 s["prev_no"] = no
-                            if no and no != "Auto" and parse_nominal(no):
-                                s["last_no"] = parse_nominal(no)
+                            doc, counter = parse_no_transaksi(no)
+                            if doc:
+                                s["last_no"], s["last_urut"] = doc, counter
                         except Exception:
                             pass
                 elif s["phase"] == "closed-watch":
                     try:
-                        no = self.read_no(s["main"])
-                        num = parse_nominal(no) if no and no != "Auto" else None
-                        if num:
-                            log.info("simpan via tutup-dialog hwnd=%s no=%s", hwnd, num)
-                            self._save(hwnd, s, num)
+                        doc_id, counter = parse_no_transaksi(self.read_no(s["main"]))
+                        if doc_id:
+                            log.info("simpan via tutup-dialog hwnd=%s no=%s", hwnd, doc_id)
+                            self._save(hwnd, s, doc_id, counter)
                         elif self.clock() >= s["deadline"]:
                             self.sessions.pop(hwnd, None)  # tak muncul -> discard
                     except Exception as e:

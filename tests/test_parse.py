@@ -1,4 +1,4 @@
-from src.parse import parse_nominal
+from src.parse import parse_no_transaksi, parse_nominal
 
 
 def test_id_format():
@@ -23,3 +23,12 @@ def test_empty_and_none():
 
 def test_datetime_rejected():
     assert parse_nominal("10/3/2026 5:11 PM") is None
+
+
+def test_no_dokumen_full_dan_counter():
+    assert parse_no_transaksi("001519/KSR/SURJO/1026") == ("001519/KSR/SURJO/1026", "001519")
+    assert parse_no_transaksi("9001") == ("9001", "9001")
+    assert parse_no_transaksi("  Auto  ") == (None, None)
+    assert parse_no_transaksi("") == (None, None)
+    assert parse_no_transaksi(None) == (None, None)
+    assert parse_no_transaksi("KSR/1026") == (None, None)

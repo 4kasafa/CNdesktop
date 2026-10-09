@@ -2,6 +2,21 @@
 import re
 
 
+def parse_no_transaksi(raw: str | None) -> tuple[str | None, str | None]:
+    """Nomor dokumen kasir -> (doc_id, counter).
+
+    Full string = ID unik (`001519/KSR/SURJO/1026`); digit terdepan = nomor
+    urut untuk deteksi missing di HP. Tolak kosong/`Auto`/non-digit-di-depan.
+    """
+    s = (raw or "").strip()
+    if not s or s.lower() == "auto":
+        return None, None
+    m = re.match(r"\d+", s)
+    if not m:
+        return None, None
+    return s, m.group(0)
+
+
 def parse_nominal(raw: str | None) -> int | None:
     """`Rp 150.000,00` → `150000`. Tolak tanggal/jam, nol, kosong → `None`."""
     if not raw:
