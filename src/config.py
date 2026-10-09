@@ -9,8 +9,8 @@ KETOKO_WINDOW_TITLE = "Ketoko.co.id"
 
 LOCK_NAME = "cndesktop.lock"
 
-# Watcher (PRD §2): idle hook + baca 250ms + burst 100ms x 5 dtk + enum 5 dtk
-READ_EVERY, BURST_EVERY, BURST_MAX, ENUM_EVERY = 0.25, 0.1, 5.0, 5.0
+# Watcher (PRD §2): idle hook + baca 250ms + worker 100ms + enum 5 dtk
+READ_EVERY, BURST_EVERY, ENUM_EVERY = 0.25, 0.1, 5.0
 
 # Logging geser (PRD §9)
 LOG_FILE, LOG_MAX_BYTES, LOG_BACKUPS = "cndesktop.log", 512 * 1024, 5

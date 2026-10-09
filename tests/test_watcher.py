@@ -31,38 +31,31 @@ def _run(w, steps=30):
 
 
 def test_save_flow(caplog):
+    """Alur utama: tutup + total>0 -> pending, nomor muncul -> tersimpan 1 baris."""
     w = _watcher(nos={"m1": ["Auto", "7788"]})
     w.on_dialog_open(111, "m1")
     with caplog.at_level(logging.INFO, logger="cndesktop"):
-        w.on_invoked(111)
+        w.on_dialog_close(111)
         _run(w)
     rows = list_since(w.db)
     assert len(rows) == 1 and rows[0]["kategori"] == "Tunai" and rows[0]["total"] == 150000
     assert 111 not in w.sessions
 
 
-def test_timeout_discards(caplog):
-    w = _watcher(nos={"m1": ["Auto"] * 100})
-    w.on_dialog_open(111, "m1")
-    with caplog.at_level(logging.WARNING, logger="cndesktop"):
-        w.on_invoked(111)
-        _run(w, steps=70)
-    assert list_since(w.db) == [] and 111 not in w.sessions
-    assert "needs_review" in caplog.text
-
-
 def test_close_with_number_saves():
-    """Tutup-dialog + no sudah angka (hook INVOKED mati) -> tetap tersimpan."""
+    """Tutup-dialog + no sudah angka -> pending dulu, tersimpan di poll berikut."""
     w = _watcher(nos={"m1": ["9001"]})
     w.on_dialog_open(111, "m1")
     _run(w, steps=5)
     w.on_dialog_close(111)
+    assert 111 not in w.sessions and w.pending is not None and list_since(w.db) == []
+    _run(w, steps=10)
     rows = list_since(w.db)
     assert len(rows) == 1 and rows[0]["no_transaksi"] == "9001"
 
 
-def test_close_auto_discards_silent(caplog):
-    """Tutup-dialog + masih Auto (= Batal) -> slot pending, tanpa save/warning."""
+def test_close_auto_goes_pending(caplog):
+    """Tutup-dialog + masih Auto + total>0 -> slot pending, tanpa save/warning."""
     w = _watcher()
     w.on_dialog_open(111, "m1")
     _run(w, steps=5)
@@ -73,6 +66,7 @@ def test_close_auto_discards_silent(caplog):
 
 
 def test_close_without_save():
+    """Tutup + total>0 tanpa nomor -> pending (save menyusul saat nomor muncul)."""
     w = _watcher()
     w.on_dialog_open(111, "m1")
     _run(w, steps=5)
@@ -81,23 +75,28 @@ def test_close_without_save():
     assert 111 not in w.sessions and w.pending is not None
 
 
+def test_close_empty_discards():
+    """Tutup + total kosong (= Batal sejati) -> tanpa pending, tanpa save."""
+    w = _watcher(snap={"total_raw": "", "tunai_raw": "", "debit_raw": "", "bank_raw": ""})
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    assert 111 not in w.sessions and w.pending is None and list_since(w.db) == []
+
+
 def test_multi_hwnd():
-    w = _watcher(nos={"m1": ["9001"], "m2": ["9002"]})
+    """Dua penjualan berurutan (tutup-A -> nomor-A -> tutup-B -> nomor-B) -> 2 baris."""
+    w = _watcher(nos={"m1": ["Auto", "Auto", "9001", "9001"], "m2": ["Auto", "9002"]})
     w.on_dialog_open(111, "m1")
-    w.on_dialog_open(222, "m2")
-    w.on_invoked(111)
-    w.on_invoked(222)
-    _run(w)
-    assert len(list_since(w.db)) == 2
-
-
-def test_double_invoked_one_row():
-    w = _watcher(nos={"m1": ["9001", "9001"]})
-    w.on_dialog_open(111, "m1")
-    w.on_invoked(111)
-    w.on_invoked(111)
-    _run(w)
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    _run(w)  # nomor-A muncul -> save baris 1
     assert len(list_since(w.db)) == 1
+    w.on_dialog_open(222, "m2")
+    _run(w, steps=5)
+    w.on_dialog_close(222)
+    _run(w)  # nomor-B muncul -> save baris 2
+    assert len(list_since(w.db)) == 2
 
 
 def test_reattach_after_kill():
@@ -200,11 +199,15 @@ def test_tick_empty_read_keeps_snap():
 
 
 def test_no_transition_logged(caplog):
-    """Transisi Auto->angka->Auto tercatat di log (peta timing nomor)."""
-    w = _watcher(nos={"m1": ["Auto", "Auto", "9001", "Auto", "Auto"]})
+    """Transisi Auto->angka->Auto tercatat di log (peta timing nomor, tanpa dialog)."""
+    w = _watcher(nos={"m1": ["Auto", "9001", "Auto", "Auto"]})
     w.on_dialog_open(111, "m1")
+    w.on_dialog_close(111)
+    w._main = "m1"  # simulasi enum sudah menemukan window utama
     with caplog.at_level(logging.INFO, logger="cndesktop"):
-        _run(w, steps=15)
+        for _ in range(25):  # manual (tanpa break dini _run) agar transisi pasca-save ikut terbaca
+            w.tick()
+            w._tick_time[0] += 0.1
     assert "'Auto' -> '9001'" in caplog.text and "'9001' -> 'Auto'" in caplog.text
 
 
@@ -215,16 +218,17 @@ def test_mismatch_review(caplog):
                  nos={"m1": ["9001"]})
     w.on_dialog_open(111, "m1")
     with caplog.at_level(logging.WARNING, logger="cndesktop"):
-        w.on_invoked(111)
+        w.on_dialog_close(111)
         _run(w)
     assert list_since(w.db) == [] and "needs_review" in caplog.text
 
 
 def test_incomplete_data_review(caplog):
-    w = _watcher(snap={"total_raw": "", "tunai_raw": "", "debit_raw": "", "bank_raw": ""},
+    """Total ada tapi komposisi tak lengkap (debit separuh tanpa bank) -> needs_review, tanpa save."""
+    w = _watcher(snap={"total_raw": "150.000,00", "tunai_raw": "", "debit_raw": "50.000,00", "bank_raw": ""},
                  nos={"m1": ["9001"]})
     w.on_dialog_open(111, "m1")
     with caplog.at_level(logging.WARNING, logger="cndesktop"):
-        w.on_invoked(111)
+        w.on_dialog_close(111)
         _run(w)
     assert list_since(w.db) == [] and "needs_review" in caplog.text

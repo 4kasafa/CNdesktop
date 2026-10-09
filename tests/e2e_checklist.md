@@ -5,8 +5,8 @@ Yang `[ ]` wajib transaksi live di mesin toko.
 
 ## Sudah hijau (tidak perlu diulang)
 
-- [x] `python -m pytest -v` 27 passed (parse, classify, db, api, watcher)
-- [x] §2 hook idle + burst 100ms x 5 dtk (unit: save/timeout/close/multi-hwnd/double-invoked)
+- [x] `python -m pytest -v` 39 passed (parse, classify, db, api, watcher)
+- [x] §2 hook idle + save-via-pending (unit: save/close/pending/transisi/multi-hwnd/empty-discard)
 - [x] §3 locator UIA terverifikasi live (debit = field sebaris combo bank, `dump_debit.json`)
 - [x] §4 klasifikasi Tunai/Nontunai/Split + `needs_review` (unit + live Nontunai 28600/BCA)
 - [x] §5 skema + `UNIQUE(no_transaksi)` anti-duplikat (unit)
@@ -14,7 +14,7 @@ Yang `[ ]` wajib transaksi live di mesin toko.
 - [x] §7 dashboard tray-only (smoke: refresh/port/test-baca/hide-bukan-exit)
 - [x] Idle CPU ~0% (sampel 3 mnt EXE), RAM private 46MB
 - [x] Tidak auto-print (tidak ada code path print di repo)
-- [x] Tidak klik/fokus kasir (watcher + reader read-only; INVOKED hanya dideteksi)
+- [x] Tidak klik/fokus kasir (watcher + reader read-only; tanpa deteksi INVOKED)
 - [x] Grid `GrdCtrl` tidak diambil (scope ditutup, tidak ada kode grid)
 
 ## Wajib live di mesin toko (kasir transaksi sungguhan)

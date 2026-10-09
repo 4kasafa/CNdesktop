@@ -1,7 +1,8 @@
-"""Watcher dialog Pembayaran: WinEventHook idle + burst save. Read-only.
+"""Watcher dialog Pembayaran: WinEventHook idle + save via pending. Read-only.
 
-Idle 99%: SetWinEventHook (CREATE/SHOW/HIDE/DESTROY/INVOKED), ~0% CPU.
-Aktif: baca UIA 250ms saat dialog terbuka; burst 100ms x 5 dtk pasca-INVOKED.
+Idle 99%: SetWinEventHook (CREATE/SHOW/HIDE/DESTROY), ~0% CPU.
+Aktif: baca UIA 250ms saat dialog terbuka; tutup + total>0 -> pending, simpan
+saat nomor transaksi muncul (poll global 500ms, tanpa batas waktu).
 Tidak pernah klik/fokus/steal-foreground. Exception → log + silent.
 """
 import ctypes
@@ -11,7 +12,7 @@ import time
 from ctypes import wintypes
 
 from src.classify import classify
-from src.config import BURST_EVERY, BURST_MAX, ENUM_EVERY, READ_EVERY
+from src.config import BURST_EVERY, ENUM_EVERY, READ_EVERY
 from src.db import init_db, insert_tx
 from src.parse import parse_no_transaksi, parse_nominal
 from src.pos_reader import (
@@ -24,7 +25,7 @@ from src.pos_reader import (
 
 log = logging.getLogger("cndesktop")
 
-EV_CREATE, EV_DESTROY, EV_SHOW, EV_HIDE, EV_INVOKED = 0x8000, 0x8001, 0x8002, 0x8003, 0x8013
+EV_CREATE, EV_DESTROY, EV_SHOW, EV_HIDE = 0x8000, 0x8001, 0x8002, 0x8003
 WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS = 0, 2
 
 
@@ -77,9 +78,10 @@ class Watcher:
         self.read_no = read_no_fn or read_no_transaksi
         self.enum = enum_fn or _enum_ketoko
         self.clock = clock or time.monotonic
-        self.sessions = {}  # hwnd -> {main, snap, phase, deadline(burst), last_read, last_no, last_urut, prev_no}
+        self.sessions = {}  # hwnd -> {main, snap, last_read} (hidup selama dialog terbuka)
         self.pending = None  # {"snap": dict, "main": hwnd, "t": float} slot tunggal
         self._last_seen = ""  # dokumen terakhir terlihat (transisi global)
+        self._last_no_text = ""  # teks nomor mentah terakhir (log transisi)
         self._last_poll = 0.0
         self._main = 0
         self._last_enum = 0.0
@@ -89,8 +91,7 @@ class Watcher:
     def on_dialog_open(self, hwnd, main_hwnd):
         """Return True jika sesi baru dibuat."""
         if hwnd not in self.sessions:
-            self.sessions[hwnd] = {"main": main_hwnd, "snap": {}, "phase": "open",
-                                    "deadline": 0.0, "last_read": 0.0, "last_no": ""}
+            self.sessions[hwnd] = {"main": main_hwnd, "snap": {}, "last_read": 0.0}
             return True
         return False
 
@@ -98,49 +99,23 @@ class Watcher:
         s = self.sessions.get(hwnd)
         if not s:
             return
-        if s["phase"] == "burst":
-            self.sessions.pop(hwnd, None)
-            log.warning("needs_review: dialog hilang saat burst hwnd=%s", hwnd)
-            return
-        if s["phase"] == "closed-watch":
-            return  # ponytail: fase lama, abaikan (tak dipakai lagi)
-        # Tutup-dialog: bernomor -> save langsung; masih Auto -> slot pending.
+        # Tutup: total>0 -> slot pending (tunggu nomor, tanpa batas waktu);
+        # total 0/kosong (= Batal murni) -> buang diam-diam.
         try:
-            fresh = self.read_dialog(hwnd)
-            _merge_snap(s["snap"], fresh)
+            _merge_snap(s["snap"], self.read_dialog(hwnd))
         except Exception:
             pass
-        try:
-            no = self.read_no(s["main"])
-        except Exception:
-            no = ""
-        log.info("tutup hwnd=%s main=%s no=%r last_no=%r", hwnd, s["main"], no, s.get("last_no"))
-        doc_id, counter = parse_no_transaksi(no)
-        if doc_id is None and s.get("last_no"):
-            doc_id, counter = s["last_no"], s.get("last_urut", "")  # no ke-clear saat tutup
-        if doc_id is None:
-            self.pending = {"snap": dict(s["snap"]), "main": s["main"], "t": self.clock()}
-            self.sessions.pop(hwnd, None)
+        self.sessions.pop(hwnd, None)
+        total = parse_nominal(s["snap"].get("total_raw") or "")
+        if not total:
+            log.info("tutup hwnd=%s batal (total kosong)", hwnd)
             return
-        self._last_seen = doc_id  # ponytail: pending basi jangan ikut tersimpan
-        self.pending = None
-        log.info("simpan via tutup-dialog hwnd=%s no=%s", hwnd, doc_id)
-        self._save(hwnd, s, doc_id, counter)
-
-    def on_invoked(self, hwnd):
-        s = self.sessions.get(hwnd)
-        if not s or s["phase"] == "burst":
-            return  # ponytail: unknown-hwnd / double-INVOKED = abaikan (UNIQUE jaga dobel)
-        try:
-            _merge_snap(s["snap"], self.read_dialog(hwnd))  # ponytail: seed lawan race Simpan <250ms
-        except Exception as e:
-            log.debug("seed snap gagal hwnd=%s: %r", hwnd, e)
-        s["phase"] = "burst"
-        s["deadline"] = self.clock() + BURST_MAX
+        self.pending = {"snap": dict(s["snap"]), "main": s["main"], "t": self.clock()}
+        log.info("tutup hwnd=%s -> pending (total=%s)", hwnd, total)
 
     # ---- kerja periodik ----
     def _save(self, hwnd, s, doc_id, counter):
-        """Klasifikasi + INSERT dari snap. Dipakai burst maupun tutup-dialog."""
+        """Klasifikasi + INSERT dari snap pending + nomor transisi."""
         total = parse_nominal((s["snap"].get("total_raw") or ""))
         tunai = parse_nominal((s["snap"].get("tunai_raw") or ""))
         debit = parse_nominal((s["snap"].get("debit_raw") or ""))
@@ -157,19 +132,6 @@ class Watcher:
                 log.info("saved id=%s no=%s urut=%s kat=%s", rowid, doc_id, counter, kat)
         self.sessions.pop(hwnd, None)
 
-    def _finish_burst(self, hwnd, s):
-        doc_id, counter = parse_no_transaksi(self.read_no(s["main"]))
-        if doc_id:
-            self._last_seen = doc_id
-            self.pending = None
-            self._save(hwnd, s, doc_id, counter)
-            return True
-        if self.clock() >= s["deadline"]:
-            log.warning("needs_review: timeout 5 dtk hwnd=%s", hwnd)
-            self.sessions.pop(hwnd, None)
-            return True
-        return False
-
     def _poll_pending(self, now):
         """Poll global nomor 500ms; transisi + pending -> save sekali pakai."""
         if now - self._last_poll < 0.5:
@@ -182,6 +144,9 @@ class Watcher:
             no = self.read_no(main)
         except Exception:
             return
+        if no != self._last_no_text:  # ponytail: peta timing nomor (satu-satunya log transisi)
+            log.info("no_transaksi %r -> %r", self._last_no_text, no)
+            self._last_no_text = no
         doc_id, counter = parse_no_transaksi(no)
         if not doc_id or doc_id == self._last_seen:
             return
@@ -189,8 +154,9 @@ class Watcher:
         if not self.pending:
             return  # hanya catat (Batal -> tak ada transisi -> tak ada save)
         snap = self.pending["snap"]
+        age = now - self.pending["t"]
         self.pending = None  # konsumsi sekali pakai (sukses/gagal sama)
-        log.info("simpan via transisi-nomor no=%s", doc_id)
+        log.info("simpan via transisi-nomor no=%s umur_pending=%.1fs", doc_id, age)
         try:
             self._save("pending", {"snap": snap}, doc_id, counter)
         except Exception as e:
@@ -201,32 +167,12 @@ class Watcher:
         try:
             now = self.clock()
             for hwnd, s in list(self.sessions.items()):
-                if s["phase"] == "open":
-                    if now - s["last_read"] >= READ_EVERY:
-                        s["last_read"] = now
-                        try:
-                            _merge_snap(s["snap"], self.read_dialog(hwnd))
-                        except Exception as e:
-                            log.debug("read gagal hwnd=%s: %r", hwnd, e)
-                        try:  # ponytail: ingat no numerik terakhir (tutupan fallback)
-                            no = self.read_no(s["main"])
-                            prev = s.get("prev_no")
-                            if prev is None:
-                                s["prev_no"] = no
-                            elif no != prev:
-                                log.info("no_transaksi main=%s %r -> %r", s["main"], prev, no)
-                                s["prev_no"] = no
-                            doc, counter = parse_no_transaksi(no)
-                            if doc:
-                                s["last_no"], s["last_urut"] = doc, counter
-                        except Exception:
-                            pass
-                elif s["phase"] == "burst":
+                if now - s["last_read"] >= READ_EVERY:
+                    s["last_read"] = now
                     try:
-                        self._finish_burst(hwnd, s)
+                        _merge_snap(s["snap"], self.read_dialog(hwnd))
                     except Exception as e:
-                        log.debug("burst gagal hwnd=%s: %r", hwnd, e)
-                        self.sessions.pop(hwnd, None)
+                        log.debug("read gagal hwnd=%s: %r", hwnd, e)
             self._poll_pending(now)
             if now - self._last_enum >= ENUM_EVERY:
                 self._last_enum = now
@@ -261,14 +207,6 @@ class Watcher:
     # ---- glue Win32 ----
     def _event(self, _hook, event, hwnd, _obj, _child, _tid, _time):
         try:
-            if event == EV_INVOKED:
-                try:
-                    if get_window_process_name(hwnd).lower() == KETOKO_PROCESS_NAME.lower():
-                        log.info("invoked (hook) hwnd=%s obj=%s", hwnd, _obj)
-                except Exception:
-                    pass
-                self.on_invoked(hwnd)
-                return
             proc_ok = get_window_process_name(hwnd).lower() == KETOKO_PROCESS_NAME.lower()
             if not proc_ok:
                 return
@@ -291,7 +229,7 @@ class Watcher:
         self._proc = proto(self._event)  # ponytail: simpan ref agar tidak di-GC
         self._tid = ctypes.windll.kernel32.GetCurrentThreadId()
         hook = ctypes.windll.user32.SetWinEventHook(
-            EV_CREATE, EV_INVOKED, 0, self._proc, 0, 0,
+            EV_CREATE, EV_HIDE, 0, self._proc, 0, 0,
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS)
         if not hook:
             log.error("SetWinEventHook gagal (NULL): hanya fallback enum 5 dtk aktif")

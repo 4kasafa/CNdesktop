@@ -28,10 +28,10 @@ KetokoD.exe (WPF)
                                                         └─ tray-icon → dashboard lokal
 ```
 
-* Idle 99%: `SetWinEventHook` — `EVENT_OBJECT_CREATE/SHOW` filter `Name="Pembayaran"` + PID `KetokoD.exe` = mulai; `HIDE/DESTROY` = batal/ditutup; `EVENT_OBJECT_INVOKED` pada `ButSimpanCetak` + `Simpan` polos = trigger save. Idle ~0% CPU, ~30-50MB RAM.
+* Idle 99%: `SetWinEventHook` — `EVENT_OBJECT_CREATE/SHOW` filter `Name="Pembayaran"` + PID `KetokoD.exe` = mulai; `HIDE/DESTROY` = tutup (total>0 → pending, total kosong → discard). Tanpa trigger INVOKED — nomor Ketoko adalah validator tunggal (muncul ⟺ transaksi sukses tersimpan). Idle ~0% CPU, ~30-50MB RAM.
 * Dilarang polling idle 500ms. Pengaman saja: `EnumWindows` tiap 5 detik jika hook miss (WPF obfuscated).
 * Aktif singkat (dialog terbuka saja): baca UIA tiap 250ms — Total kuning, `tBayarTunai`, field Debit, ComboBank.
-* Burst pasca-save saja: poll `tNoTransaksi` tiap 100ms × maks 5 dtk sampai `Auto → angka`, lalu save dan kembali idle.
+* Save via pending: tutup + total>0 → slot pending; poll global `tNoTransaksi` tiap 500ms sampai transisi ke angka (tanpa batas waktu), lalu save sekali pakai dan kembali idle.
 * Stack: Python stdlib (`ctypes`, `sqlite3`, `http.server`) + `uiautomation` (reuse `pos_reader.py` dari `docs/pos.md`) + satu dep tray (`pystray`). Autostart via Startup folder.
 
 ## 3. Locator UIA (dari `pos_inspect.md`)
@@ -56,8 +56,8 @@ Parsing nominal: `Rp 150.000,00 → 150000` (strip `,\d{1,2}$`, ambil digit, tol
 2. Baca `ComboBank.Value`: kosong dan field Debit `0`/kosong → kandidat Tunai. Ada isi → baca nominal Debit.
 3. `debit == total` → Nontunai. `debit < total` → baca `tBayarTunai`; jika `debit + tunai == total` → Split.
 4. Tunai murni: simpan Total saja, abaikan input tunai (kembalian tidak disimpan).
-5. Tunggu `INVOKED Simpan` / `Simpan+Cetak` → burst-poll No Transaksi sampai angka.
-6. Lengkap (Total + kategori + No Transaksi angka) → `INSERT`. Timeout 5 dtk / dialog hilang duluan / data tak lengkap → discard + log `needs_review`, tanpa save separuh.
+5. Dialog tutup + total>0 → slot pending (snapshot + window utama). Total kosong (= Batal) → discard diam-diam.
+6. Poll global No Transaksi tiap 500ms; transisi ke angka + ada pending → klasifikasi + `INSERT` sekali pakai. Nomor tak muncul = tak ada save (Batal). Data tak lengkap → log `needs_review`, tanpa save separuh.
 7. HP polling periodik dan mengambil transaksi baru (repo HP terpisah).
 
 Pseudocode klasifikasi:
@@ -88,7 +88,7 @@ CREATE TABLE IF NOT EXISTS transactions(
 );
 ```
 
-Idempoten via `UNIQUE(no_transaksi)` — double `INVOKED` tidak duplikat. Multi-dialog: satu transaksi per `hwnd`.
+Idempoten via `UNIQUE(no_transaksi)` — transisi nomor yang sama tidak dobel (`_last_seen` + slot sekali pakai). Multi-dialog: satu transaksi per `hwnd`.
 
 ## 6. API LAN (HP polling, tanpa auth)
 
@@ -109,10 +109,10 @@ Out of scope. Tidak ada auto-print. Data hanya disiapkan di SQLite + API untuk H
 ## 9. Edge & Non-fungsional
 
 * Windows 10/11 x64, Ketoko `v2.3.1.0`. Gagal baca UIA = silent + log, jangan crash/block kasir (pola `pos_reader.py`: tidak pernah raise dari thread background).
-* Batal (dialog hilang tanpa save) = discard. Multi-dialog = antre per `hwnd` dengan kunci sederhana.
-* Beban: idle ~0% CPU; burst baca hanya saat dialog terbuka / 5 dtk pasca-save.
+* Batal (tutup + total kosong) = discard diam-diam; tutup + total>0 = pending sampai nomor muncul. Multi-dialog = antre per `hwnd` dengan kunci sederhana.
+* Beban: idle ~0% CPU; baca UIA hanya saat dialog terbuka (250ms) + poll nomor global tiap 500ms.
 * Deposit/Kredit/E-Money di luar scope (kasir hanya pakai Tunai + Debit).
 
 ## 10. Acceptance
 
-PRD lengkap jika §2–§7 terimplementasi: hook idle + burst-poll 100ms×5s, klasifikasi §4, skema §5, 2 endpoint §6, dashboard §7. Verifikasi: 1× transaksi Tunai + 1× Nontunai + 1× Split terbaca benar + `since` HP tidak duplikat + idle CPU ~0%.
+PRD lengkap jika §2–§7 terimplementasi: hook idle + save-via-pending (poll 500ms tanpa batas waktu), klasifikasi §4, skema §5, 2 endpoint §6, dashboard §7. Verifikasi: 1× transaksi Tunai + 1× Nontunai + 1× Split terbaca benar + `since` HP tidak duplikat + idle CPU ~0%.
