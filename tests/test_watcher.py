@@ -110,11 +110,36 @@ def test_reattach_after_kill():
     w._reconcile()
     assert 555 in w.sessions  # dialog terdeteksi
     wins.clear()  # kill: semua window hilang (hwnd fake -> _alive False)
-    w._reconcile()
-    assert 555 not in w.sessions  # sesi dibersihkan, tanpa crash
+    t[0] += 10.0
+    w.tick()  # tutup -> closed-watch
+    assert 555 in w.sessions
+    t[0] += 10.0
+    w.tick()  # deadline lewat -> dibersihkan, tanpa crash
+    assert 555 not in w.sessions
     wins.append((555, "Pembayaran"))  # buka lagi
     w._reconcile()
     assert 555 in w.sessions  # terdeteksi ulang
+
+
+def test_close_watch_late_number_saves():
+    """Nomor muncul SETELAH tutup (timing kasir) -> watch pasca-tutup simpan."""
+    w = _watcher(nos={"m1": ["Auto"] * 10 + ["9001"] * 60})
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    assert 111 in w.sessions  # closed-watch, belum discard
+    _run(w, steps=60)
+    rows = list_since(w.db)
+    assert len(rows) == 1 and rows[0]["no_transaksi"] == "9001"
+
+
+def test_no_transition_logged(caplog):
+    """Transisi Auto->angka->Auto tercatat di log (peta timing nomor)."""
+    w = _watcher(nos={"m1": ["Auto", "Auto", "9001", "Auto", "Auto"]})
+    w.on_dialog_open(111, "m1")
+    with caplog.at_level(logging.INFO, logger="cndesktop"):
+        _run(w, steps=15)
+    assert "'Auto' -> '9001'" in caplog.text and "'9001' -> 'Auto'" in caplog.text
 
 
 def test_mismatch_review(caplog):

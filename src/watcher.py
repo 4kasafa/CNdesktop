@@ -75,19 +75,26 @@ class Watcher:
 
     # ---- event murni (dipakai hook maupun test) ----
     def on_dialog_open(self, hwnd, main_hwnd):
-        if hwnd not in self.sessions:
+        """Return True jika sesi baru dibuat (termasuk reset closed-watch basi)."""
+        s = self.sessions.get(hwnd)
+        if s is None or s.get("phase") == "closed-watch":
             self.sessions[hwnd] = {"main": main_hwnd, "snap": {}, "phase": "open",
                                     "deadline": 0.0, "last_read": 0.0, "last_no": ""}
+            return True
+        return False
 
     def on_dialog_close(self, hwnd):
-        s = self.sessions.pop(hwnd, None)
+        s = self.sessions.get(hwnd)
         if not s:
             return
         if s["phase"] == "burst":
+            self.sessions.pop(hwnd, None)
             log.warning("needs_review: dialog hilang saat burst hwnd=%s", hwnd)
             return
+        if s["phase"] == "closed-watch":
+            return  # ponytail: tutup ganda = abaikan
         # fallback Simpan: dialog hilang tanpa INVOKED (hook mati?) tapi no
-        # sudah angka -> anggap Simpan terjadi. Masih Auto (= Batal) -> discard.
+        # sudah angka -> anggap Simpan terjadi. Masih Auto -> watch pasca-tutup.
         try:
             fresh = self.read_dialog(hwnd)
             for k, v in fresh.items():
@@ -99,13 +106,16 @@ class Watcher:
             no = self.read_no(s["main"])
         except Exception:
             no = ""
+        log.info("tutup hwnd=%s main=%s no=%r last_no=%r", hwnd, s["main"], no, s.get("last_no"))
         num = parse_nominal(no) if no and no != "Auto" else None
         if num is None and s.get("last_no"):
             num = s["last_no"]  # ponytail: no sudah ke-clear saat deteksi tutup
-        if num is None:
+        if num is not None:
+            log.info("simpan via tutup-dialog hwnd=%s no=%s", hwnd, num)
+            self._save(hwnd, s, num)
             return
-        log.info("simpan via tutup-dialog hwnd=%s no=%s", hwnd, num)
-        self._save(hwnd, s, num)
+        s["phase"] = "closed-watch"  # T3: poll nomor 5 dtk pasca-tutup
+        s["deadline"] = self.clock() + BURST_MAX
 
     def on_invoked(self, hwnd):
         s = self.sessions.get(hwnd)
@@ -131,7 +141,10 @@ class Watcher:
         else:
             t, n = (total, 0) if kat == "Tunai" else (0, total) if kat == "Nontunai" else (tunai, debit)
             rowid = insert_tx(self.db, str(num), total, t, n, bank, kat)
-            log.info("saved id=%s no=%s kat=%s", rowid, num, kat)
+            if rowid is None:
+                log.info("duplikat no=%s (abaikan)", num)
+            else:
+                log.info("saved id=%s no=%s kat=%s", rowid, num, kat)
         self.sessions.pop(hwnd, None)
 
     def _finish_burst(self, hwnd, s):
@@ -160,10 +173,28 @@ class Watcher:
                             log.debug("read gagal hwnd=%s: %r", hwnd, e)
                         try:  # ponytail: ingat no numerik terakhir (tutupan fallback)
                             no = self.read_no(s["main"])
+                            prev = s.get("prev_no")
+                            if prev is None:
+                                s["prev_no"] = no
+                            elif no != prev:
+                                log.info("no_transaksi main=%s %r -> %r", s["main"], prev, no)
+                                s["prev_no"] = no
                             if no and no != "Auto" and parse_nominal(no):
                                 s["last_no"] = parse_nominal(no)
                         except Exception:
                             pass
+                elif s["phase"] == "closed-watch":
+                    try:
+                        no = self.read_no(s["main"])
+                        num = parse_nominal(no) if no and no != "Auto" else None
+                        if num:
+                            log.info("simpan via tutup-dialog hwnd=%s no=%s", hwnd, num)
+                            self._save(hwnd, s, num)
+                        elif self.clock() >= s["deadline"]:
+                            self.sessions.pop(hwnd, None)  # tak muncul -> discard
+                    except Exception as e:
+                        log.debug("closed-watch gagal hwnd=%s: %r", hwnd, e)
+                        self.sessions.pop(hwnd, None)
                 elif s["phase"] == "burst":
                     try:
                         self._finish_burst(hwnd, s)
@@ -186,9 +217,8 @@ class Watcher:
         for hwnd, title in wins:
             if title == "Pembayaran":
                 seen.add(hwnd)
-                if hwnd not in self.sessions:
+                if self.on_dialog_open(hwnd, main):
                     log.info("dialog terbuka (fallback enum) hwnd=%s", hwnd)
-                    self.on_dialog_open(hwnd, main)
         for hwnd in list(self.sessions):
             if hwnd not in seen and not self._alive(hwnd):
                 self.on_dialog_close(hwnd)
@@ -216,10 +246,10 @@ class Watcher:
                 return
             title = _title(hwnd)
             if event in (EV_CREATE, EV_SHOW) and title == "Pembayaran":
-                log.info("dialog terbuka (hook) hwnd=%s", hwnd)
                 main = next((h for h, t in self.enum()
                              if KETOKO_WINDOW_TITLE.lower() in t.lower()), 0)
-                self.on_dialog_open(hwnd, main)
+                if self.on_dialog_open(hwnd, main):
+                    log.info("dialog terbuka (hook) hwnd=%s", hwnd)
             elif event in (EV_DESTROY, EV_HIDE) and hwnd in self.sessions:
                 log.info("dialog tutup (hook) hwnd=%s", hwnd)
                 self.on_dialog_close(hwnd)
