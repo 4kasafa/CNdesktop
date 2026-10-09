@@ -26,7 +26,7 @@ def _run(w, steps=30):
     for _ in range(steps):
         w.tick()
         w._tick_time[0] += 0.1
-        if not w.sessions:
+        if not w.sessions and not w.pending:
             break
 
 
@@ -62,13 +62,14 @@ def test_close_with_number_saves():
 
 
 def test_close_auto_discards_silent(caplog):
-    """Tutup-dialog + masih Auto (= Batal) -> discard tanpa warning."""
+    """Tutup-dialog + masih Auto (= Batal) -> slot pending, tanpa save/warning."""
     w = _watcher()
     w.on_dialog_open(111, "m1")
     _run(w, steps=5)
     with caplog.at_level(logging.WARNING, logger="cndesktop"):
         w.on_dialog_close(111)
     assert list_since(w.db) == [] and "needs_review" not in caplog.text
+    assert 111 not in w.sessions and w.pending is not None
 
 
 def test_close_without_save():
@@ -77,6 +78,7 @@ def test_close_without_save():
     _run(w, steps=5)
     w.on_dialog_close(111)
     assert list_since(w.db) == []
+    assert 111 not in w.sessions and w.pending is not None
 
 
 def test_multi_hwnd():
@@ -99,7 +101,7 @@ def test_double_invoked_one_row():
 
 
 def test_reattach_after_kill():
-    """Simulasi kill Ketoko -> buka lagi: sesi dibersihkan lalu terdeteksi ulang."""
+    """Simulasi kill Ketoko -> buka lagi: pending tersisa, sesi terdeteksi ulang."""
     import tempfile
     t = [0.0]
     wins = [(555, "Pembayaran")]
@@ -111,26 +113,27 @@ def test_reattach_after_kill():
     assert 555 in w.sessions  # dialog terdeteksi
     wins.clear()  # kill: semua window hilang (hwnd fake -> _alive False)
     t[0] += 10.0
-    w.tick()  # tutup -> closed-watch
-    assert 555 in w.sessions
+    w.tick()  # tutup -> slot pending (sesi hilang)
+    assert 555 not in w.sessions and w.pending is not None
     t[0] += 10.0
-    w.tick()  # deadline lewat -> dibersihkan, tanpa crash
-    assert 555 not in w.sessions
+    w.tick()  # Auto terus -> tanpa save, tanpa crash
+    assert 555 not in w.sessions and list_since(w.db) == []
     wins.append((555, "Pembayaran"))  # buka lagi
     w._reconcile()
     assert 555 in w.sessions  # terdeteksi ulang
 
 
 def test_close_watch_late_number_saves():
-    """Nomor muncul SETELAH tutup (timing kasir) -> watch pasca-tutup simpan."""
+    """Nomor muncul SETELAH tutup -> slot pending + transisi simpan (sekali pakai)."""
     w = _watcher(nos={"m1": ["Auto"] * 10 + ["9001"] * 60})
     w.on_dialog_open(111, "m1")
     _run(w, steps=5)
     w.on_dialog_close(111)
-    assert 111 in w.sessions  # closed-watch, belum discard
+    assert 111 not in w.sessions and w.pending is not None
     _run(w, steps=60)
     rows = list_since(w.db)
     assert len(rows) == 1 and rows[0]["no_transaksi"] == "9001"
+    assert w.pending is None
 
 
 def test_close_watch_formatted_no_saves_both():
@@ -142,6 +145,58 @@ def test_close_watch_formatted_no_saves_both():
     _run(w, steps=60)
     r = list_since(w.db)[0]
     assert r["no_transaksi"] == "001519/KSR/SURJO/1026" and r["no_urut"] == "001519"
+
+
+def test_pending_late_number_30s():
+    """Tutup-Auto lalu nomor muncul 30 dtk kemudian -> tersimpan 1 baris."""
+    w = _watcher(nos={"m1": ["Auto"] * 10 + ["9001"] * 60})
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    w._tick_time[0] += 30.0  # nomor kasir telat 30 dtk (kasus 001529)
+    _run(w, steps=60)
+    rows = list_since(w.db)
+    assert len(rows) == 1 and rows[0]["no_transaksi"] == "9001"
+
+
+def test_pending_same_number_no_double():
+    """Transisi ulang nomor sama -> tidak dobel."""
+    w = _watcher(nos={"m1": ["Auto"] * 10 + ["9001"] * 60})
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    _run(w, steps=60)
+    assert len(list_since(w.db)) == 1
+    _run(w, steps=30)
+    assert len(list_since(w.db)) == 1
+
+
+def test_pending_cancel_no_save():
+    """Batal (Auto terus) -> tidak ada save, pending tetap menunggu."""
+    w = _watcher(nos={"m1": ["Auto"] * 100})
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    _run(w, steps=60)
+    assert list_since(w.db) == []
+
+
+def test_tick_empty_read_keeps_snap():
+    """T1: baca penuh lalu baca kosong -> snapshot lama utuh."""
+    calls = [{"total_raw": "150.000,00", "tunai_raw": "200.000,00", "debit_raw": "0", "bank_raw": ""},
+             {"total_raw": "", "tunai_raw": "", "debit_raw": "", "bank_raw": ""}]
+    import tempfile
+    t = [0.0]
+    w = Watcher(db_path=os.path.join(tempfile.mkdtemp(), "m.db"),
+                read_dialog_fn=lambda h: dict(calls[0] if t[0] < 0.4 else calls[1]),
+                read_no_fn=lambda m: "Auto",
+                enum_fn=lambda: [], clock=lambda: t[0])
+    w._tick_time = t
+    w.on_dialog_open(111, "m1")
+    for _ in range(6):
+        w.tick()
+        t[0] += 0.1
+    assert w.sessions[111]["snap"].get("total_raw") == "150.000,00"
 
 
 def test_no_transition_logged(caplog):
