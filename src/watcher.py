@@ -22,6 +22,7 @@ from src.pos_reader import (
     drop_dialog_cache,
     drop_no_cache,
     get_window_process_name,
+    lifetime_init,
     read_dialog,
     read_dialog_fast,
     read_no_transaksi,
@@ -140,8 +141,9 @@ class Watcher:
                 pass
             total = parse_nominal(snap.get("total_raw") or "")
         if not total:
+            ada = ",".join(k[:-4] for k, v in snap.items() if v) or "-"
             if seen:
-                log.info("tutup hwnd=%s batal (total kosong)", hwnd)
+                log.info("tutup hwnd=%s batal (total kosong, ada=%s)", hwnd, ada)
             else:
                 log.warning("tutup hwnd=%s gagal-baca (tak pernah terbaca)", hwnd)
             return
@@ -380,24 +382,28 @@ class Watcher:
                 ctypes.windll.user32.UnhookWinEvent(hook)
 
     def _worker(self):
-        while self._run:
-            try:
-                now = self.clock()
-                self._tick_sessions(now)
-                if now - self._last_enum >= ENUM_EVERY:
-                    self._last_enum = now
-                    self._reconcile()
-            except Exception as e:
-                log.debug("worker sesi gagal: %r", e)
-            time.sleep(BURST_EVERY)
+        # ponytail: tahan COM init seumur thread agar handle cache valid antar-sampel
+        with lifetime_init():
+            while self._run:
+                try:
+                    now = self.clock()
+                    self._tick_sessions(now)
+                    if now - self._last_enum >= ENUM_EVERY:
+                        self._last_enum = now
+                        self._reconcile()
+                except Exception as e:
+                    log.debug("worker sesi gagal: %r", e)
+                time.sleep(BURST_EVERY)
 
     def _worker_no(self):
-        while self._run:
-            try:
-                self._poll_pending(self.clock())
-            except Exception as e:
-                log.debug("worker nomor gagal: %r", e)
-            time.sleep(NO_EVERY)
+        # ponytail: tahan COM init seumur thread agar handle cache valid antar-sampel
+        with lifetime_init():
+            while self._run:
+                try:
+                    self._poll_pending(self.clock())
+                except Exception as e:
+                    log.debug("worker nomor gagal: %r", e)
+                time.sleep(NO_EVERY)
 
     def stop(self):
         self._run = False

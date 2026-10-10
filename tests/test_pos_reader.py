@@ -5,20 +5,24 @@ from src import pos_reader as P
 
 
 class _Stub:
-    """Elemen UIA palsu: Exists terkendali + ValuePattern."""
+    """Elemen UIA palsu: ValuePattern (mati = semua raise, tanpa Exists)."""
 
     def __init__(self, alive=True, value="001699/KSR/SURJO/1026"):
         self._alive = alive
         self._value = value
 
     def Exists(self, _a, _b):
-        return self._alive
+        raise AssertionError("fast path tak boleh tree-walk")
 
     def GetValuePattern(self):
+        if not self._alive:
+            raise RuntimeError("element dead")
         return SimpleNamespace(Value=self._value)
 
     @property
     def Name(self):
+        if not self._alive:
+            raise RuntimeError("element dead")
         return ""
 
     def GetLegacyIAccessiblePattern(self):
@@ -51,6 +55,12 @@ def test_drop_caches_safe():
     P.drop_no_cache(123456)
 
 
+def test_lifetime_init_smoke():
+    """lifetime_init dapat di-hold via with (context seumur thread pekerja)."""
+    with P.lifetime_init():
+        pass
+
+
 class _Counting:
     """Elemen UIA hitung pola baca: sukses harus tepat 1 COM call (Value)."""
 
@@ -58,7 +68,7 @@ class _Counting:
         self.calls = []
 
     def Exists(self, _a, _b):
-        return True
+        raise AssertionError("fast path tak boleh tree-walk")
 
     def GetValuePattern(self):
         from types import SimpleNamespace
@@ -94,7 +104,7 @@ class _LegacyOnly:
         self._value = value
 
     def Exists(self, _a, _b):
-        return True
+        raise AssertionError("fast path tak boleh tree-walk")
 
     def GetValuePattern(self):
         self.calls.append("value")
@@ -122,3 +132,16 @@ def test_no_winner_source():
     finally:
         P._EL_NO.pop(780, None)
         P._EL_SRC.pop(780, None)
+
+
+def test_dialog_fast_no_exists():
+    """Fast dialog tanpa tree-walk: total+tunai dari cache, Exists tak tersentuh."""
+    P._EL_TOTAL[781] = _Stub(alive=True, value="24.000,00")
+    P._EL_SRC[(781, "total")] = "value"
+    P._EL_TUNAI[781] = _Stub(alive=True, value="50.000,00")
+    P._EL_SRC[(781, "tunai")] = "value"
+    try:
+        out = P.read_dialog_fast(781)
+        assert out["total_raw"] == "24.000,00" and out["tunai_raw"] == "50.000,00"
+    finally:
+        P.drop_dialog_cache(781)

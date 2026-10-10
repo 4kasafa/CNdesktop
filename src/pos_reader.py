@@ -26,6 +26,8 @@ def drop_dialog_cache(hwnd: int) -> None:
     """Buang cache dialog agar tak bocor/basi. Aman untuk hwnd tak dikenal."""
     for d in (_EL_TOTAL, _EL_TUNAI):
         d.pop(hwnd, None)
+    _EL_SRC.pop((hwnd, "total"), None)
+    _EL_SRC.pop((hwnd, "tunai"), None)
 
 
 def drop_no_cache(main: int) -> None:
@@ -88,20 +90,6 @@ def _read_edit_sources(edit) -> dict:
     return sources
 
 
-def _read_src(edit, src: str) -> str:
-    """Satu sumber teks saja (1 COM call). '' bila gagal/kosong, tidak pernah raise."""
-    try:
-        if src == "value":
-            return edit.GetValuePattern().Value or ""
-        if src == "name":
-            return edit.Name or ""
-        if src == "legacy":
-            return (edit.GetLegacyIAccessiblePattern().Value or "")[:200]
-    except Exception:
-        pass
-    return ""
-
-
 def _iter_edits(control, depth: int = 0, max_depth: int = 10):
     """Yield semua EditControl secara rekursif (GetDescendants tidak ada di lib ini)."""
     if depth > max_depth:
@@ -144,6 +132,16 @@ def _raw(edit) -> str:
     return s.get("value") or s.get("name") or s.get("legacy") or ""
 
 
+def lifetime_init():
+    """Context UIA seumur-thread pekerja; tahan dengan `with` di luar loop.
+
+    Per-poll `with UIAutomationInitializerInThread()` tetap ada dan bersarang
+    aman (CoInit refcount per-thread). Tanpa holder ini tiap poll diakhiri
+    CoUninitialize sehingga handle cache basi dan tiap sampel lambat.
+    """
+    return auto.UIAutomationInitializerInThread()
+
+
 def _rect_top(edit) -> int:
     try:
         return edit.BoundingRectangle.top
@@ -159,18 +157,47 @@ def _area(edit) -> int:
         return 0
 
 
-def _cached(el_cache: dict, hwnd: int):
-    """Elemen cache bila masih hidup (Exists tanpa tunggu), else None + buang."""
-    el = el_cache.get(hwnd)
+def _try_src(edit, src: str) -> str:
+    """Satu sumber teks (1 COM call). Boleh raise (pemanggil yang menangani)."""
+    if src == "value":
+        return edit.GetValuePattern().Value or ""
+    if src == "name":
+        return edit.Name or ""
+    if src == "legacy":
+        return (edit.GetLegacyIAccessiblePattern().Value or "")[:200]
+    return ""
+
+
+def _fast_read(el_cache: dict, src_cache: dict, el_key, src_key=None):
+    """(teks, status) tanpa Exists/tree-walk: hit=berisi, empty=hidup tapi kosong,
+    miss=tanpa cache/basi (pemanggil rescan). Pemenang adaptif per src_key."""
+    if src_key is None:
+        src_key = el_key
+    el = el_cache.get(el_key)
     if el is None:
-        return None
+        return "", "miss"
+    winner = src_cache.get(src_key, "value")
     try:
-        if el.Exists(0, 0):
-            return el
+        v = _try_src(el, winner)
     except Exception:
-        pass
-    el_cache.pop(hwnd, None)
-    return None
+        el_cache.pop(el_key, None)
+        src_cache.pop(src_key, None)
+        return "", "miss"
+    if v:
+        return v, "hit"
+    for src in ("value", "name", "legacy"):
+        if src == winner:
+            continue
+        try:
+            w = _try_src(el, src)
+        except Exception:
+            el_cache.pop(el_key, None)
+            src_cache.pop(src_key, None)
+            return "", "miss"
+        if w:
+            src_cache[src_key] = src
+            return w, "hit"
+    return "", "empty"
 
 
 def read_dialog_fast(hwnd: int) -> dict:
@@ -184,14 +211,15 @@ def read_dialog_fast(hwnd: int) -> dict:
         return out
     try:
         with auto.UIAutomationInitializerInThread():
-            el = _cached(_EL_TOTAL, hwnd)
-            if el is not None:
-                out["total_raw"] = _raw(el)
-            el = _cached(_EL_TUNAI, hwnd)
-            if el is not None:
-                out["tunai_raw"] = _raw(el)
+            # ponytail: baca langsung tanpa Exists (Exists = tree-walk ~0.3s)
+            t_val, t_st = _fast_read(_EL_TOTAL, _EL_SRC, hwnd, (hwnd, "total"))
+            out["total_raw"] = t_val
+            n_val, n_st = _fast_read(_EL_TUNAI, _EL_SRC, hwnd, (hwnd, "tunai"))
+            out["tunai_raw"] = n_val
             if out["total_raw"] and out["tunai_raw"]:
                 return out
+            if t_st != "miss" and n_st != "miss":
+                return out  # elemen hidup tapi kosong (loading) -> tanpa rescan
             dlg = auto.ControlFromHandle(hwnd)
             if not dlg or not dlg.Exists(0.5, 0.5):
                 return out
@@ -207,13 +235,23 @@ def read_dialog_fast(hwnd: int) -> dict:
                         continue
                 if best is not None:
                     _EL_TOTAL[hwnd] = best
-                    out["total_raw"] = _raw(best)
+                    s = _read_edit_sources(best)
+                    for src in ("value", "name", "legacy"):
+                        if s.get(src):
+                            _EL_SRC[(hwnd, "total")] = src
+                            break
+                    out["total_raw"] = s.get("value") or s.get("name") or s.get("legacy") or ""
             if not out["tunai_raw"]:
                 try:
                     t = dlg.EditControl(searchDepth=10, AutomationId="tBayarTunai")
                     if t.Exists(0.5, 0.5):
                         _EL_TUNAI[hwnd] = t
-                        out["tunai_raw"] = _raw(t)
+                        s = _read_edit_sources(t)
+                        for src in ("value", "name", "legacy"):
+                            if s.get(src):
+                                _EL_SRC[(hwnd, "tunai")] = src
+                                break
+                        out["tunai_raw"] = s.get("value") or s.get("name") or s.get("legacy") or ""
                 except Exception:
                     pass
     except Exception:
@@ -243,13 +281,23 @@ def read_dialog(hwnd: int) -> dict:
                     continue
             if best is not None:
                 _EL_TOTAL[hwnd] = best  # ponytail: full scan juga mengisi cache fast path
-                out["total_raw"] = _raw(best)
+                s = _read_edit_sources(best)
+                for src in ("value", "name", "legacy"):
+                    if s.get(src):
+                        _EL_SRC[(hwnd, "total")] = src
+                        break
+                out["total_raw"] = s.get("value") or s.get("name") or s.get("legacy") or ""
             # Bayar Tunai by aid (satu-satunya field bayar ber-aid stabil)
             try:
                 t = dlg.EditControl(searchDepth=10, AutomationId="tBayarTunai")
                 if t.Exists(1, 0.5):
                     _EL_TUNAI[hwnd] = t
-                    out["tunai_raw"] = _raw(t)
+                    s = _read_edit_sources(t)
+                    for src in ("value", "name", "legacy"):
+                        if s.get(src):
+                            _EL_SRC[(hwnd, "tunai")] = src
+                            break
+                    out["tunai_raw"] = s.get("value") or s.get("name") or s.get("legacy") or ""
             except Exception:
                 pass
             # Bank: combo yang BERNILAI (sudah dipilih) + sebaris Edit
@@ -325,11 +373,10 @@ def read_no_transaksi(hwnd_main: int) -> str:
         return ""
     try:
         with auto.UIAutomationInitializerInThread():
-            el = _cached(_EL_NO, hwnd_main)
-            if el is not None:  # ponytail: sumber-pemenang, 1 call bila berisi
-                v = _read_src(el, _EL_SRC.get(hwnd_main, "value"))
-                return v if v else _raw(el)  # kosong: verifikasi sumber lain (fase '' sesaat)
-            m = auto.ControlFromHandle(hwnd_main)
+            v, st = _fast_read(_EL_NO, _EL_SRC, hwnd_main)
+            if v or st == "empty":
+                return v  # hit / hidup-tapi-kosong: tanpa scan
+            m = auto.ControlFromHandle(hwnd_main)  # miss -> rescan penuh sekali
             if not m or not m.Exists(1, 0.5):
                 return ""
             # ponytail: typed EditControl agar GetValuePattern tersedia

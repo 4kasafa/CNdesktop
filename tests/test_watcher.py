@@ -303,6 +303,18 @@ def test_obj_filter():
         W.get_window_process_name, W._title = orig_proc, orig_title
 
 
+def test_batal_line_isi_ada(caplog):
+    """Batal dengan sebagian field terbaca -> baris sebut fieldnya (diagnosis locator)."""
+    w = _watcher(snap={"total_raw": "", "tunai_raw": "50.000,00", "debit_raw": "", "bank_raw": ""})
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    assert w.sessions[111].get("seen") is True
+    with caplog.at_level(logging.INFO, logger="cndesktop"):
+        w.on_dialog_close(111)
+    assert "batal" in caplog.text and "ada=tunai" in caplog.text
+    assert w.pending is None and list_since(w.db) == []
+
+
 def test_unread_bukan_batal(caplog):
     """Snap tak pernah terbaca (reader selalu kosong) -> warning gagal-baca, bukan batal diam."""
     w = _watcher(snap={"total_raw": "", "tunai_raw": "", "debit_raw": "", "bank_raw": ""})
