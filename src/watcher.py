@@ -96,6 +96,8 @@ class Watcher:
         self._last_seen = ""  # dokumen terakhir terlihat (transisi global)
         self._last_no_text = ""  # teks nomor mentah terakhir (log transisi)
         self._last_poll = 0.0
+        self._last_warn_no = 0.0  # ponytail: throttle warning lambat (log kasir ramping)
+        self._last_warn_dlg = 0.0
         self._main = 0
         self._last_enum = 0.0
         self._run = False
@@ -118,9 +120,9 @@ class Watcher:
             s = self.sessions.get(hwnd)
             if not s:
                 return
-            # Tutup: pakai snap memori (fast tiap READ_EVERY, full tiap FULL_EVERY).
-            # Fallback 1x read hanya bila snap masih kosong (dialog kilat
-            # atau test open-langsung-close); jalur normal tetap zero-latency.
+            # Tutup: pakai snap memori (fast tiap READ_EVERY, full bila perlu).
+            # Fallback 1x FAST read bila snap kosong (dialog mati -> gagal ms-an,
+            # bukan full scan 3 dtk yang sia-sia + blokir hook thread).
             self.sessions.pop(hwnd, None)
             try:
                 drop_dialog_cache(hwnd)
@@ -132,7 +134,7 @@ class Watcher:
         total = parse_nominal(snap.get("total_raw") or "")
         if not total:
             try:
-                if _merge_snap(snap, self.read_dialog(hwnd)):
+                if _merge_snap(snap, self.read_dialog_fast(hwnd)):
                     seen = True
             except Exception:
                 pass
@@ -171,7 +173,8 @@ class Watcher:
         """Refresh snap tanpa menahan lock saat UIA blocking.
 
         Fast-first: tick awal hanya fast (total+tunai murah); full scan pertama
-        hanya bila fast sudah dapat total ATAU grace berlalu, lalu tiap FULL_EVERY.
+        hanya bila fast sudah dapat total non-Tunai ATAU grace berlalu, lalu tiap
+        FULL_EVERY selama bukan Tunai (tanpa bank+debit = Tunai, tak butuh full).
         """
         for hwnd, s in list(self.sessions.items()):
             try:
@@ -185,14 +188,20 @@ class Watcher:
                 if cur is None or now - cur.get("last_read", 0.0) < READ_EVERY:
                     continue
                 cur["last_read"] = now
+                try:  # ponytail: Tunai lengkap -> full scan 3 dtk tak ada guna
+                    tot = parse_nominal(cur["snap"].get("total_raw") or "")
+                    tun = parse_nominal(cur["snap"].get("tunai_raw") or "")
+                    tunai_ok = bool(tot) and tun >= tot
+                except Exception:
+                    tunai_ok = False
                 if not cur.get("full_done"):
-                    full = bool(cur["snap"].get("total_raw")) \
-                        or now - cur.get("born", now) >= FAST_GRACE
+                    full = (bool(tot) and not tunai_ok) \
+                        or (not tot and now - cur.get("born", now) >= FAST_GRACE)
                     if full:
                         cur["full_done"] = True
                         cur["last_full"] = now
                 else:
-                    full = now - cur.get("last_full", 0.0) >= FULL_EVERY
+                    full = not tunai_ok and now - cur.get("last_full", 0.0) >= FULL_EVERY
                     if full:
                         cur["last_full"] = now
             t0 = self.clock()
@@ -203,8 +212,13 @@ class Watcher:
                 continue
             dt = self.clock() - t0
             if dt > 1.0:
-                log.warning("baca dialog lambat hwnd=%s %.1fs (%s)", hwnd, dt,
-                            "full" if full else "fast")
+                if now - self._last_warn_dlg >= 60.0:
+                    self._last_warn_dlg = now
+                    log.warning("baca dialog lambat hwnd=%s %.1fs (%s)", hwnd, dt,
+                                "full" if full else "fast")
+                else:
+                    log.debug("baca dialog lambat hwnd=%s %.1fs (%s)", hwnd, dt,
+                              "full" if full else "fast")
             try:
                 with self._lock:
                     cur = self.sessions.get(hwnd)
@@ -227,7 +241,11 @@ class Watcher:
             no = self.read_no(main)
             dt_no = self.clock() - t0
             if dt_no > 0.2:
-                log.warning("read_no lambat %.2fs", dt_no)
+                if now - self._last_warn_no >= 60.0:
+                    self._last_warn_no = now
+                    log.warning("read_no lambat %.2fs", dt_no)
+                else:
+                    log.debug("read_no lambat %.2fs", dt_no)
             elif dt_no > 0.05:  # ponytail: bukti bila cache tak mempan
                 log.debug("read_no lambat %.2fs", dt_no)
         except Exception:

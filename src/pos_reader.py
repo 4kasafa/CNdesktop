@@ -18,6 +18,8 @@ KETOKO_EDIT_CLASS = "l11illlII111I"
 # ponytail: cache handle UIA per-hwnd; scan subtree mahal sekali, baca ulang murah.
 # Dibuang saat dialog tutup / handle basi (Exists gagal) / main berganti.
 _EL_TOTAL, _EL_TUNAI, _EL_NO = {}, {}, {}
+# ponytail: sumber-pemenang per main-hwnd (value/name/legacy); fast path 1 call saja.
+_EL_SRC = {}
 
 
 def drop_dialog_cache(hwnd: int) -> None:
@@ -29,6 +31,7 @@ def drop_dialog_cache(hwnd: int) -> None:
 def drop_no_cache(main: int) -> None:
     """Buang cache nomor main window (Ketoko restart)."""
     _EL_NO.pop(main, None)
+    _EL_SRC.pop(main, None)
 
 
 def get_window_process_name(hwnd: int) -> str:
@@ -83,6 +86,20 @@ def _read_edit_sources(edit) -> dict:
     except Exception as e:
         sources["legacy_err"] = repr(e)
     return sources
+
+
+def _read_src(edit, src: str) -> str:
+    """Satu sumber teks saja (1 COM call). '' bila gagal/kosong, tidak pernah raise."""
+    try:
+        if src == "value":
+            return edit.GetValuePattern().Value or ""
+        if src == "name":
+            return edit.Name or ""
+        if src == "legacy":
+            return (edit.GetLegacyIAccessiblePattern().Value or "")[:200]
+    except Exception:
+        pass
+    return ""
 
 
 def _iter_edits(control, depth: int = 0, max_depth: int = 10):
@@ -309,12 +326,9 @@ def read_no_transaksi(hwnd_main: int) -> str:
     try:
         with auto.UIAutomationInitializerInThread():
             el = _cached(_EL_NO, hwnd_main)
-            if el is not None:  # ponytail: 1 COM call, tanpa scan/tunggu/Name/Legacy
-                try:
-                    return el.GetValuePattern().Value or ""
-                except Exception:
-                    pass
-                return _raw(el)  # jarang: Value gagal, coba Name/Legacy tanpa rescan
+            if el is not None:  # ponytail: sumber-pemenang, 1 call bila berisi
+                v = _read_src(el, _EL_SRC.get(hwnd_main, "value"))
+                return v if v else _raw(el)  # kosong: verifikasi sumber lain (fase '' sesaat)
             m = auto.ControlFromHandle(hwnd_main)
             if not m or not m.Exists(1, 0.5):
                 return ""
@@ -322,7 +336,12 @@ def read_no_transaksi(hwnd_main: int) -> str:
             e = m.EditControl(searchDepth=10, AutomationId="tNoTransaksi")
             if e and e.Exists(1, 0.5):
                 _EL_NO[hwnd_main] = e
-                return _raw(e)
+                s = _read_edit_sources(e)
+                for src in ("value", "name", "legacy"):  # catat pemenang utk fast path
+                    if s.get(src):
+                        _EL_SRC[hwnd_main] = src
+                        break
+                return s.get("value") or s.get("name") or s.get("legacy") or ""
     except Exception:
         pass
     return ""

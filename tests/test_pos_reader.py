@@ -84,3 +84,41 @@ def test_no_value_only():
         assert el.calls == ["value"]
     finally:
         P._EL_NO.pop(779, None)
+
+
+class _LegacyOnly:
+    """Value raise + Name kosong: pemenang = legacy."""
+
+    def __init__(self, value):
+        self.calls = []
+        self._value = value
+
+    def Exists(self, _a, _b):
+        return True
+
+    def GetValuePattern(self):
+        self.calls.append("value")
+        raise RuntimeError("no value pattern")
+
+    @property
+    def Name(self):
+        self.calls.append("name")
+        return ""
+
+    def GetLegacyIAccessiblePattern(self):
+        from types import SimpleNamespace
+        self.calls.append("legacy")
+        return SimpleNamespace(Value=self._value)
+
+
+def test_no_winner_source():
+    """Sumber-pemenang tercatat: sampel berikut tepat 1 call sumber itu."""
+    el = _LegacyOnly("001700/KSR/SURJO/1026")
+    P._EL_NO[780] = el
+    P._EL_SRC[780] = "legacy"
+    try:
+        assert P.read_no_transaksi(780) == "001700/KSR/SURJO/1026"
+        assert el.calls == ["legacy"]
+    finally:
+        P._EL_NO.pop(780, None)
+        P._EL_SRC.pop(780, None)

@@ -363,9 +363,11 @@ def test_fast_first():
     w.tick()
     assert len(calls["full"]) >= 1
 
-    # fast dapat total -> full langsung tanpa tunggu grace
+    # fast dapat total non-Tunai -> full langsung tanpa tunggu grace;
+    # fast Tunai lengkap -> full tetap skip
     t2 = [0.0]
     calls2 = {"full": [], "fast": []}
+    PART = {"total_raw": "150.000,00", "tunai_raw": "50.000,00", "debit_raw": "", "bank_raw": ""}
 
     def fake_full2(h):
         calls2["full"].append(t2[0])
@@ -373,7 +375,7 @@ def test_fast_first():
 
     def fake_fast2(h):
         calls2["fast"].append(t2[0])
-        return dict(TUNAI)
+        return dict(PART)
 
     w2 = Watcher(db_path=os.path.join(tempfile.mkdtemp(), "ff2.db"),
                  read_dialog_fn=fake_full2, read_dialog_fast_fn=fake_fast2,
@@ -383,3 +385,71 @@ def test_fast_first():
         w2.tick()
         t2[0] += 0.1
     assert calls2["full"] and calls2["full"][0] < 1.0
+
+
+def test_skip_full_when_tunai():
+    """Snap Tunai lengkap -> full scan mahal tak pernah jalan (grace+cadence lewat)."""
+    import tempfile
+    t = [0.0]
+    calls = {"full": 0, "fast": 0}
+
+    def fake_full(h):
+        calls["full"] += 1
+        return dict(TUNAI)
+
+    def fake_fast(h):
+        calls["fast"] += 1
+        return dict(TUNAI)
+
+    w = Watcher(db_path=os.path.join(tempfile.mkdtemp(), "sf.db"),
+                read_dialog_fn=fake_full, read_dialog_fast_fn=fake_fast,
+                read_no_fn=lambda m: "Auto", enum_fn=lambda: [], clock=lambda: t[0])
+    w.on_dialog_open(111, "m1")
+    for _ in range(20):  # t 0.0-1.9: grace + 1 cadence full terlewati
+        w.tick()
+        t[0] += 0.1
+    assert calls["fast"] > 0 and calls["full"] == 0
+    assert w.sessions[111]["snap"].get("total_raw") == "150.000,00"
+
+
+def test_close_fallback_fast():
+    """Fallback close pakai fast (bukan full 3 dtk): fast dipanggil, full tidak."""
+    import tempfile
+    t = [0.0]
+    calls = {"full": 0, "fast": 0}
+
+    def fake_full(h):
+        calls["full"] += 1
+        return dict(TUNAI)
+
+    def fake_fast(h):
+        calls["fast"] += 1
+        return dict(TUNAI)
+
+    w = Watcher(db_path=os.path.join(tempfile.mkdtemp(), "cf.db"),
+                read_dialog_fn=fake_full, read_dialog_fast_fn=fake_fast,
+                read_no_fn=lambda m: "Auto", enum_fn=lambda: [], clock=lambda: t[0])
+    w.on_dialog_open(111, "m1")
+    w.on_dialog_close(111)  # snap kosong -> fallback fast
+    assert calls["fast"] >= 1 and calls["full"] == 0
+    assert w.pending is not None  # fast selamatkan total -> pending
+
+
+def test_warn_throttle(caplog):
+    """Baca lambat berurutan -> warning pertama saja, sisanya debug (max 1/menit)."""
+    import tempfile
+    t = [10.0]
+
+    def slow_no(m):
+        t[0] += 0.5  # simulasi baca 0.5s (jam fake ikut maju)
+        return "Auto"
+
+    w = Watcher(db_path=os.path.join(tempfile.mkdtemp(), "wt.db"),
+                read_dialog_fn=lambda h: dict(TUNAI),
+                read_no_fn=slow_no, enum_fn=lambda: [], clock=lambda: t[0])
+    w._main = "m1"
+    w._last_warn_no = -100.0
+    with caplog.at_level(logging.WARNING, logger="cndesktop"):
+        w._poll_pending(t[0])
+        w._poll_pending(t[0])
+    assert caplog.text.count("read_no lambat") == 1
