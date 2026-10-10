@@ -1,4 +1,4 @@
-"""Pasang CNdesktop ke Startup folder Windows (tray otomatis tiap login).
+"""DEV-ONLY: kasir pakai installer/setup_cn.bat. Pasang CNdesktop ke Startup folder Windows (tray otomatis tiap login).
 
 Target: dist/CNdesktop.exe bila ada (hasil build Fase 6),
 fallback dev: pythonw.exe src/tray.py. Stdlib saja (via PowerShell COM).

@@ -2,7 +2,7 @@
 
 Idle 99%: SetWinEventHook (CREATE/SHOW/HIDE/DESTROY), ~0% CPU.
 Aktif: baca UIA 250ms saat dialog terbuka; tutup + total>0 -> pending, simpan
-saat nomor transaksi muncul (poll global 500ms, tanpa batas waktu).
+saat nomor transaksi muncul (poll global 75ms thread sendiri, tanpa batas waktu).
 Tidak pernah klik/fokus/steal-foreground. Exception → log + silent.
 """
 import ctypes
@@ -12,7 +12,7 @@ import time
 from ctypes import wintypes
 
 from src.classify import classify
-from src.config import BURST_EVERY, ENUM_EVERY, READ_EVERY
+from src.config import BURST_EVERY, ENUM_EVERY, NO_EVERY, READ_EVERY
 from src.db import init_db, insert_tx
 from src.parse import parse_no_transaksi, parse_nominal
 from src.pos_reader import (
@@ -80,6 +80,7 @@ class Watcher:
         self.clock = clock or time.monotonic
         self.sessions = {}  # hwnd -> {main, snap, last_read} (hidup selama dialog terbuka)
         self.pending = None  # {"snap": dict, "main": hwnd, "t": float} slot tunggal
+        self._lock = threading.Lock()  # ponytail: poll nomor thread sendiri vs worker sesi
         self._last_seen = ""  # dokumen terakhir terlihat (transisi global)
         self._last_no_text = ""  # teks nomor mentah terakhir (log transisi)
         self._last_poll = 0.0
@@ -91,26 +92,35 @@ class Watcher:
     def on_dialog_open(self, hwnd, main_hwnd):
         """Return True jika sesi baru dibuat."""
         if hwnd not in self.sessions:
-            self.sessions[hwnd] = {"main": main_hwnd, "snap": {}, "last_read": 0.0}
+            with self._lock:
+                self.pending = None  # sesi baru -> pending lama tak bernomor pasti basi, buang
+                self.sessions[hwnd] = {"main": main_hwnd, "snap": {}, "last_read": 0.0}
             return True
         return False
 
     def on_dialog_close(self, hwnd):
-        s = self.sessions.get(hwnd)
-        if not s:
-            return
-        # Tutup: total>0 -> slot pending (tunggu nomor, tanpa batas waktu);
-        # total 0/kosong (= Batal murni) -> buang diam-diam.
-        try:
-            _merge_snap(s["snap"], self.read_dialog(hwnd))
-        except Exception:
-            pass
-        self.sessions.pop(hwnd, None)
-        total = parse_nominal(s["snap"].get("total_raw") or "")
+        with self._lock:
+            s = self.sessions.get(hwnd)
+            if not s:
+                return
+            # Tutup: pakai snap memori (di-refresh tick tiap READ_EVERY).
+            # Fallback 1x read hanya bila snap masih kosong (dialog kilat <250ms
+            # atau test open-langsung-close); jalur normal tetap zero-latency.
+            self.sessions.pop(hwnd, None)
+            snap = dict(s["snap"])
+            main = s["main"]
+        total = parse_nominal(snap.get("total_raw") or "")
+        if not total:
+            try:
+                _merge_snap(snap, self.read_dialog(hwnd))
+            except Exception:
+                pass
+            total = parse_nominal(snap.get("total_raw") or "")
         if not total:
             log.info("tutup hwnd=%s batal (total kosong)", hwnd)
             return
-        self.pending = {"snap": dict(s["snap"]), "main": s["main"], "t": self.clock()}
+        with self._lock:
+            self.pending = {"snap": snap, "main": main, "t": self.clock()}
         log.info("tutup hwnd=%s -> pending (total=%s)", hwnd, total)
 
     # ---- kerja periodik ----
@@ -130,49 +140,91 @@ class Watcher:
                 log.info("duplikat no=%s (abaikan)", doc_id)
             else:
                 log.info("saved id=%s no=%s urut=%s kat=%s", rowid, doc_id, counter, kat)
-        self.sessions.pop(hwnd, None)
+        with self._lock:
+            self.sessions.pop(hwnd, None)
+
+    def _tick_sessions(self, now):
+        """Refresh snap tiap READ_EVERY tanpa menahan lock saat UIA blocking."""
+        for hwnd, s in list(self.sessions.items()):
+            try:
+                due = now - s.get("last_read", 0.0) >= READ_EVERY
+            except Exception:
+                continue
+            if not due:
+                continue
+            with self._lock:
+                cur = self.sessions.get(hwnd)
+                if cur is None or now - cur.get("last_read", 0.0) < READ_EVERY:
+                    continue
+                cur["last_read"] = now
+            try:
+                fresh = self.read_dialog(hwnd)
+            except Exception as e:
+                log.debug("read gagal hwnd=%s: %r", hwnd, e)
+                continue
+            try:
+                with self._lock:
+                    cur = self.sessions.get(hwnd)
+                    if cur is not None:
+                        _merge_snap(cur["snap"], fresh)
+            except Exception as e:
+                log.debug("merge gagal hwnd=%s: %r", hwnd, e)
 
     def _poll_pending(self, now):
-        """Poll global nomor 500ms; transisi + pending -> save sekali pakai."""
-        if now - self._last_poll < 0.5:
+        """Poll global nomor NO_EVERY; utamakan sesi-aktif lalu pending. Tanpa batas waktu."""
+        if now - self._last_poll < NO_EVERY:
             return
         self._last_poll = now
-        main = self.pending["main"] if self.pending else self._main
+        with self._lock:
+            main = self.pending["main"] if self.pending else self._main
         if not main:
             return
         try:
             no = self.read_no(main)
         except Exception:
             return
-        if no != self._last_no_text:  # ponytail: peta timing nomor (satu-satunya log transisi)
-            log.info("no_transaksi %r -> %r", self._last_no_text, no)
-            self._last_no_text = no
+        with self._lock:
+            if no != self._last_no_text:  # ponytail: peta timing nomor (satu-satunya log transisi)
+                log.info("no_transaksi %r -> %r", self._last_no_text, no)
+                self._last_no_text = no
         doc_id, counter = parse_no_transaksi(no)
-        if not doc_id or doc_id == self._last_seen:
+        if not doc_id:
             return
-        self._last_seen = doc_id
-        if not self.pending:
-            return  # hanya catat (Batal -> tak ada transisi -> tak ada save)
-        snap = self.pending["snap"]
-        age = now - self.pending["t"]
-        self.pending = None  # konsumsi sekali pakai (sukses/gagal sama)
-        log.info("simpan via transisi-nomor no=%s umur_pending=%.1fs", doc_id, age)
+        with self._lock:
+            if doc_id == self._last_seen:
+                return
+            self._last_seen = doc_id
+            if self.sessions:
+                # Nomor datang sebelum event tutup (+14ms ala 001643):
+                # pakai snap sesi terbaru, buang pending basi, konsumsi sesi
+                # agar close susulan tak bikin pending duplikat.
+                hwnd_best = max(self.sessions, key=lambda h: self.sessions[h].get("last_read", 0.0))
+                snap = dict(self.sessions[hwnd_best]["snap"])
+                self.pending = None
+                self.sessions.pop(hwnd_best, None)
+                src = "sesi-aktif"
+                age = 0.0
+            elif self.pending:
+                snap = self.pending["snap"]
+                age = now - self.pending["t"]
+                self.pending = None  # konsumsi sekali pakai (sukses/gagal sama)
+                src = "pending"
+            else:
+                return  # hanya catat (Batal -> tak ada transisi -> tak ada save)
+        if src == "sesi-aktif":
+            log.info("simpan via transisi-nomor no=%s (sesi-aktif)", doc_id)
+        else:
+            log.info("simpan via transisi-nomor no=%s umur_pending=%.1fs", doc_id, age)
         try:
             self._save("pending", {"snap": snap}, doc_id, counter)
         except Exception as e:
             log.debug("save pending gagal: %r", e)
 
     def tick(self):
-        """Satu iterasi worker (100ms real). Tidak pernah raise."""
+        """Satu iterasi worker (100ms real). Tidak pernah raise. Dipakai test single-thread."""
         try:
             now = self.clock()
-            for hwnd, s in list(self.sessions.items()):
-                if now - s["last_read"] >= READ_EVERY:
-                    s["last_read"] = now
-                    try:
-                        _merge_snap(s["snap"], self.read_dialog(hwnd))
-                    except Exception as e:
-                        log.debug("read gagal hwnd=%s: %r", hwnd, e)
+            self._tick_sessions(now)
             self._poll_pending(now)
             if now - self._last_enum >= ENUM_EVERY:
                 self._last_enum = now
@@ -193,7 +245,9 @@ class Watcher:
                 seen.add(hwnd)
                 if self.on_dialog_open(hwnd, main):
                     log.info("dialog terbuka (fallback enum) hwnd=%s", hwnd)
-        for hwnd in list(self.sessions):
+        with self._lock:
+            hwnds = list(self.sessions)
+        for hwnd in hwnds:
             if hwnd not in seen and not self._alive(hwnd):
                 self.on_dialog_close(hwnd)
 
@@ -207,6 +261,8 @@ class Watcher:
     # ---- glue Win32 ----
     def _event(self, _hook, event, hwnd, _obj, _child, _tid, _time):
         try:
+            if event in (EV_DESTROY, EV_HIDE) and _obj != 0:
+                return  # abaikan caret/dropdown/tooltip WPF, hanya OBJID_WINDOW
             proc_ok = get_window_process_name(hwnd).lower() == KETOKO_PROCESS_NAME.lower()
             if not proc_ok:
                 return
@@ -235,6 +291,7 @@ class Watcher:
             log.error("SetWinEventHook gagal (NULL): hanya fallback enum 5 dtk aktif")
         self._run = True
         threading.Thread(target=self._worker, daemon=True).start()
+        threading.Thread(target=self._worker_no, daemon=True).start()
         try:
             msg = wintypes.MSG()
             while self._run and ctypes.windll.user32.GetMessageW(ctypes.byref(msg), 0, 0, 0):
@@ -246,8 +303,23 @@ class Watcher:
 
     def _worker(self):
         while self._run:
-            self.tick()
+            try:
+                now = self.clock()
+                self._tick_sessions(now)
+                if now - self._last_enum >= ENUM_EVERY:
+                    self._last_enum = now
+                    self._reconcile()
+            except Exception as e:
+                log.debug("worker sesi gagal: %r", e)
             time.sleep(BURST_EVERY)
+
+    def _worker_no(self):
+        while self._run:
+            try:
+                self._poll_pending(self.clock())
+            except Exception as e:
+                log.debug("worker nomor gagal: %r", e)
+            time.sleep(NO_EVERY)
 
     def stop(self):
         self._run = False

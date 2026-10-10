@@ -2,6 +2,7 @@
 import os
 
 APP_NAME = "CNdesktop"
+VERSION = "1.2.1"
 PORT = 8765
 
 KETOKO_PROCESS_NAME = "KetokoD.exe"
@@ -9,8 +10,9 @@ KETOKO_WINDOW_TITLE = "Ketoko.co.id"
 
 LOCK_NAME = "cndesktop.lock"
 
-# Watcher (PRD §2): idle hook + baca 250ms + worker 100ms + enum 5 dtk
+# Watcher (PRD §2): idle hook + baca 250ms + worker 100ms + enum 5 dtk + nomor 75ms
 READ_EVERY, BURST_EVERY, ENUM_EVERY = 0.25, 0.1, 5.0
+NO_EVERY = 0.075  # ponytail: cukup tangkap kedip nomor 250ms tanpa busy-loop
 
 # Logging geser (PRD §9)
 LOG_FILE, LOG_MAX_BYTES, LOG_BACKUPS = "cndesktop.log", 512 * 1024, 5

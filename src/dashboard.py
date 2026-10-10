@@ -99,13 +99,14 @@ def last_20(db_path: str) -> list[dict]:
 class Dashboard:
     def __init__(self, db_path, port, on_port_change=None,
                  watcher_alive=None, test_read=None):
+        from src.config import VERSION
         self.db_path = db_path
         self.port = port
         self.on_port_change = on_port_change  # fn(new_port) -> None
         self.watcher_alive = watcher_alive or (lambda: True)
         self.test_read = test_read or default_test_read
         self.root = tk.Tk()
-        self.root.title(f"CNdesktop :{port}")
+        self.root.title(f"CNdesktop v{VERSION} :{port}")
         self.root.geometry("720x480")
         self.root.protocol("WM_DELETE_WINDOW", self.hide)  # tutup = hide
         self.root.withdraw()
@@ -153,7 +154,8 @@ class Dashboard:
             self.txt_test.insert("end", "port harus 1-65535")
             return
         self.port = new
-        self.root.title(f"CNdesktop :{new}")
+        from src.config import VERSION
+        self.root.title(f"CNdesktop v{VERSION} :{new}")
         if self.on_port_change:
             self.on_port_change(new)
 

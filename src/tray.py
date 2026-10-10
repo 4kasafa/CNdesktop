@@ -57,7 +57,7 @@ def make_icon_image():
 
 def main():
     from src import api
-    from src.config import PORT
+    from src.config import PORT, VERSION
     from src.dashboard import Dashboard
     from src.db import init_db
     from src.log import setup_logging
@@ -91,7 +91,7 @@ def main():
             pass
         state["port"] = p
         start_api(p)
-        icon.title = f"CNdesktop {lan_ip()}:{p}"
+        icon.title = f"CNdesktop v{VERSION} {lan_ip()}:{p}"
 
     dash = Dashboard(
         db_path, port,
@@ -124,7 +124,7 @@ def main():
 
     icon = pystray.Icon(
         "cndesktop", make_icon_image(),
-        title=f"CNdesktop {lan_ip()}:{port}",
+        title=f"CNdesktop v{VERSION} {lan_ip()}:{port}",
         menu=pystray.Menu(
             pystray.MenuItem("Buka Dashboard", show_dashboard,
                              default=True, visible=True),

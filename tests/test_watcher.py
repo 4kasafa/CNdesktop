@@ -232,3 +232,72 @@ def test_incomplete_data_review(caplog):
         w.on_dialog_close(111)
         _run(w)
     assert list_since(w.db) == [] and "needs_review" in caplog.text
+
+
+def test_blink_250ms_saves():
+    """Kedip nomor 250ms (ala 001641:259ms) tetap tertangkap polling 75ms."""
+    import tempfile
+    t = [0.0]
+    w = Watcher(db_path=os.path.join(tempfile.mkdtemp(), "b.db"),
+                read_dialog_fn=lambda h: dict(TUNAI),
+                read_no_fn=lambda m: "9001" if 0.6 <= t[0] < 0.85 else "Auto",
+                enum_fn=lambda: [], clock=lambda: t[0])
+    w._tick_time = t
+    w.on_dialog_open(111, "m1")
+    for _ in range(5):  # 0.0-0.5: isi snap
+        w.tick()
+        t[0] += 0.1
+    w.on_dialog_close(111)  # pending di t=0.5
+    assert w.pending is not None
+    for _ in range(10):  # 0.5-1.5: lewati jendela kedip 0.6-0.85
+        w.tick()
+        t[0] += 0.1
+    rows = list_since(w.db)
+    assert len(rows) == 1 and rows[0]["no_transaksi"] == "9001"
+
+
+def test_number_before_close_pairs_active():
+    """Nomor datang 14ms sebelum tutup (ala 001643) -> pakai snap sesi-aktif, bukan pending basi."""
+    new = {"total_raw": "44.600,00", "tunai_raw": "50.000,00", "debit_raw": "0", "bank_raw": ""}
+    old = {"total_raw": "25.200,00", "tunai_raw": "25.200,00", "debit_raw": "0", "bank_raw": ""}
+    w = _watcher(snap=new, nos={"m1": ["Auto", "001643/KSR/SURJO/1026", "Auto"]})
+    w.on_dialog_open(222, "m1")
+    _run(w, steps=5)  # isi snap sesi-aktif = 44600
+    assert w.sessions[222]["snap"].get("total_raw") == "44.600,00"
+    w.pending = {"snap": dict(old), "main": "m1", "t": w._tick_time[0] - 312.9}  # paksa basi ala 001642
+    _run(w)
+    rows = list_since(w.db)
+    assert len(rows) == 1 and rows[0]["total"] == 44600 and rows[0]["no_urut"] == "001643"
+    assert w.pending is None and 222 not in w.sessions
+    w.on_dialog_close(222)  # close susulan: sesi sudah dikonsumsi -> tanpa duplikat
+    _run(w, steps=10)
+    assert len(list_since(w.db)) == 1
+
+
+def test_open_clears_stale_pending():
+    """Sesi baru membersihkan pending basi tanpa nomor."""
+    w = _watcher()
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    assert w.pending is not None
+    w.on_dialog_open(222, "m1")
+    assert w.pending is None and 222 in w.sessions
+
+
+def test_obj_filter():
+    """WinEvent non-window (_obj != 0) diabaikan: tanpa sesi baru / tanpa false-close."""
+    import src.watcher as W
+    w = _watcher()
+    orig_proc, orig_title = W.get_window_process_name, W._title
+    W.get_window_process_name = lambda h: "KetokoD.exe"
+    W._title = lambda h: "Pembayaran"
+    try:
+        w.on_dialog_open(111, "m1")
+        _run(w, steps=5)
+        w._event(None, W.EV_HIDE, 111, 1, 0, 0, 0)  # false close -> abaikan
+        assert 111 in w.sessions and w.pending is None
+        w._event(None, W.EV_HIDE, 111, 0, 0, 0, 0)  # close asli
+        assert 111 not in w.sessions and w.pending is not None
+    finally:
+        W.get_window_process_name, W._title = orig_proc, orig_title
