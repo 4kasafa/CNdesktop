@@ -2,7 +2,7 @@
 import os
 
 APP_NAME = "CNdesktop"
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 PORT = 8765
 
 KETOKO_PROCESS_NAME = "KetokoD.exe"
@@ -13,6 +13,7 @@ LOCK_NAME = "cndesktop.lock"
 # Watcher (PRD §2): idle hook + baca cepat 250ms + full 1s + worker 100ms + enum 5 dtk + nomor 30ms
 READ_EVERY, BURST_EVERY, ENUM_EVERY = 0.25, 0.1, 5.0
 FULL_EVERY = 1.0  # ponytail: bank/debit jarang berubah, total+tunai yang tiap tick
+FAST_GRACE = 1.0  # ponytail: full scan pertama ditunda sampai fast dapat total / 1s
 NO_EVERY = 0.03  # ponytail: efektif karena baca cache ~ms, bukan scan ~100ms
 
 # Logging geser (PRD §9)

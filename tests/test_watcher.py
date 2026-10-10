@@ -335,3 +335,51 @@ def test_blink_150ms_saves():
         t[0] += 0.1
     rows = list_since(w.db)
     assert len(rows) == 1 and rows[0]["no_transaksi"] == "9002"
+
+
+def test_fast_first():
+    """Tick awal hanya fast; full pertama setelah grace, atau cepat bila fast dapat total."""
+    import tempfile
+    t = [0.0]
+    calls = {"full": [], "fast": []}
+
+    def fake_full(h):
+        calls["full"].append(t[0])
+        return dict(TUNAI)
+
+    def fake_fast(h):
+        calls["fast"].append(t[0])
+        return {"total_raw": "", "tunai_raw": "", "debit_raw": "", "bank_raw": ""}
+
+    w = Watcher(db_path=os.path.join(tempfile.mkdtemp(), "ff.db"),
+                read_dialog_fn=fake_full, read_dialog_fast_fn=fake_fast,
+                read_no_fn=lambda m: "Auto", enum_fn=lambda: [], clock=lambda: t[0])
+    w.on_dialog_open(111, "m1")
+    for _ in range(5):  # t 0.0-0.4, snap kosong -> fast saja
+        w.tick()
+        t[0] += 0.1
+    assert len(calls["fast"]) > 0 and calls["full"] == []
+    t[0] = 1.5  # grace berlalu -> full pertama
+    w.tick()
+    assert len(calls["full"]) >= 1
+
+    # fast dapat total -> full langsung tanpa tunggu grace
+    t2 = [0.0]
+    calls2 = {"full": [], "fast": []}
+
+    def fake_full2(h):
+        calls2["full"].append(t2[0])
+        return dict(TUNAI)
+
+    def fake_fast2(h):
+        calls2["fast"].append(t2[0])
+        return dict(TUNAI)
+
+    w2 = Watcher(db_path=os.path.join(tempfile.mkdtemp(), "ff2.db"),
+                 read_dialog_fn=fake_full2, read_dialog_fast_fn=fake_fast2,
+                 read_no_fn=lambda m: "Auto", enum_fn=lambda: [], clock=lambda: t2[0])
+    w2.on_dialog_open(222, "m1")
+    for _ in range(8):  # t 0.0-0.7
+        w2.tick()
+        t2[0] += 0.1
+    assert calls2["full"] and calls2["full"][0] < 1.0

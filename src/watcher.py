@@ -13,7 +13,7 @@ import time
 from ctypes import wintypes
 
 from src.classify import classify
-from src.config import BURST_EVERY, ENUM_EVERY, FULL_EVERY, NO_EVERY, READ_EVERY
+from src.config import BURST_EVERY, ENUM_EVERY, FAST_GRACE, FULL_EVERY, NO_EVERY, READ_EVERY
 from src.db import init_db, insert_tx
 from src.parse import parse_no_transaksi, parse_nominal
 from src.pos_reader import (
@@ -106,8 +106,10 @@ class Watcher:
         if hwnd not in self.sessions:
             with self._lock:
                 self.pending = None  # sesi baru -> pending lama tak bernomor pasti basi, buang
+                now = self.clock()
                 self.sessions[hwnd] = {"main": main_hwnd, "snap": {}, "last_read": 0.0,
-                                       "seen": False, "last_full": 0.0}
+                                       "seen": False, "last_full": now, "born": now,
+                                       "full_done": False}
             return True
         return False
 
@@ -168,7 +170,8 @@ class Watcher:
     def _tick_sessions(self, now):
         """Refresh snap tanpa menahan lock saat UIA blocking.
 
-        Fast (total+tunai) tiap READ_EVERY; full (bank/debit) tiap FULL_EVERY.
+        Fast-first: tick awal hanya fast (total+tunai murah); full scan pertama
+        hanya bila fast sudah dapat total ATAU grace berlalu, lalu tiap FULL_EVERY.
         """
         for hwnd, s in list(self.sessions.items()):
             try:
@@ -182,14 +185,26 @@ class Watcher:
                 if cur is None or now - cur.get("last_read", 0.0) < READ_EVERY:
                     continue
                 cur["last_read"] = now
-                full = now - cur.get("last_full", 0.0) >= FULL_EVERY
-                if full:
-                    cur["last_full"] = now
+                if not cur.get("full_done"):
+                    full = bool(cur["snap"].get("total_raw")) \
+                        or now - cur.get("born", now) >= FAST_GRACE
+                    if full:
+                        cur["full_done"] = True
+                        cur["last_full"] = now
+                else:
+                    full = now - cur.get("last_full", 0.0) >= FULL_EVERY
+                    if full:
+                        cur["last_full"] = now
+            t0 = self.clock()
             try:
                 fresh = self.read_dialog(hwnd) if full else self.read_dialog_fast(hwnd)
             except Exception as e:
                 log.debug("read gagal hwnd=%s: %r", hwnd, e)
                 continue
+            dt = self.clock() - t0
+            if dt > 1.0:
+                log.warning("baca dialog lambat hwnd=%s %.1fs (%s)", hwnd, dt,
+                            "full" if full else "fast")
             try:
                 with self._lock:
                     cur = self.sessions.get(hwnd)
@@ -210,8 +225,11 @@ class Watcher:
         try:
             t0 = self.clock()
             no = self.read_no(main)
-            if self.clock() - t0 > 0.05:  # ponytail: bukti bila cache tak mempan
-                log.debug("read_no lambat %.2fs", self.clock() - t0)
+            dt_no = self.clock() - t0
+            if dt_no > 0.2:
+                log.warning("read_no lambat %.2fs", dt_no)
+            elif dt_no > 0.05:  # ponytail: bukti bila cache tak mempan
+                log.debug("read_no lambat %.2fs", dt_no)
         except Exception:
             return
         with self._lock:
@@ -233,6 +251,10 @@ class Watcher:
                 snap = dict(self.sessions[hwnd_best]["snap"])
                 self.pending = None
                 self.sessions.pop(hwnd_best, None)
+                try:
+                    drop_dialog_cache(hwnd_best)
+                except Exception:
+                    pass
                 src = "sesi-aktif"
                 age = 0.0
             elif self.pending:
@@ -243,9 +265,10 @@ class Watcher:
             else:
                 return  # hanya catat (Batal -> tak ada transisi -> tak ada save)
         if src == "sesi-aktif":
-            log.info("simpan via transisi-nomor no=%s (sesi-aktif)", doc_id)
+            log.info("simpan via transisi-nomor no=%s (sesi-aktif) baca_no=%.2fs", doc_id, dt_no)
         else:
-            log.info("simpan via transisi-nomor no=%s umur_pending=%.1fs", doc_id, age)
+            log.info("simpan via transisi-nomor no=%s umur_pending=%.1fs baca_no=%.2fs",
+                     doc_id, age, dt_no)
         try:
             self._save("pending", {"snap": snap}, doc_id, counter)
         except Exception as e:

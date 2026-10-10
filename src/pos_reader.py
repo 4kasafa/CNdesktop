@@ -309,8 +309,12 @@ def read_no_transaksi(hwnd_main: int) -> str:
     try:
         with auto.UIAutomationInitializerInThread():
             el = _cached(_EL_NO, hwnd_main)
-            if el is not None:  # ponytail: steady-state tanpa scan/tunggu
-                return _raw(el)
+            if el is not None:  # ponytail: 1 COM call, tanpa scan/tunggu/Name/Legacy
+                try:
+                    return el.GetValuePattern().Value or ""
+                except Exception:
+                    pass
+                return _raw(el)  # jarang: Value gagal, coba Name/Legacy tanpa rescan
             m = auto.ControlFromHandle(hwnd_main)
             if not m or not m.Exists(1, 0.5):
                 return ""
