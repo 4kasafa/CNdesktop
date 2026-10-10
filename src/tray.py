@@ -64,7 +64,7 @@ def main():
     from src.watcher import Watcher
 
     setup_logging()
-    log.info("start CNdesktop")
+    log.info("start CNdesktop v%s", VERSION)
 
     fh = acquire_single_instance()
     if fh is None:

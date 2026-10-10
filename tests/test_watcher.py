@@ -301,3 +301,37 @@ def test_obj_filter():
         assert 111 not in w.sessions and w.pending is not None
     finally:
         W.get_window_process_name, W._title = orig_proc, orig_title
+
+
+def test_unread_bukan_batal(caplog):
+    """Snap tak pernah terbaca (reader selalu kosong) -> warning gagal-baca, bukan batal diam."""
+    w = _watcher(snap={"total_raw": "", "tunai_raw": "", "debit_raw": "", "bank_raw": ""})
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)  # tick baca kosong terus -> seen tetap False
+    assert w.sessions[111].get("seen") is False
+    with caplog.at_level(logging.WARNING, logger="cndesktop"):
+        w.on_dialog_close(111)  # fallback read juga kosong
+    assert "gagal-baca" in caplog.text
+    assert w.pending is None and list_since(w.db) == []
+
+
+def test_blink_150ms_saves():
+    """Kedip nomor 150ms tetap tertangkap polling 30ms + reader cepat."""
+    import tempfile
+    t = [0.0]
+    w = Watcher(db_path=os.path.join(tempfile.mkdtemp(), "b150.db"),
+                read_dialog_fn=lambda h: dict(TUNAI),
+                read_no_fn=lambda m: "9002" if 0.6 <= t[0] < 0.75 else "Auto",
+                enum_fn=lambda: [], clock=lambda: t[0])
+    w._tick_time = t
+    w.on_dialog_open(111, "m1")
+    for _ in range(5):  # 0.0-0.5: isi snap
+        w.tick()
+        t[0] += 0.1
+    w.on_dialog_close(111)  # pending di t=0.5
+    assert w.pending is not None
+    for _ in range(10):  # 0.5-1.5: lewati jendela kedip 0.60-0.75
+        w.tick()
+        t[0] += 0.1
+    rows = list_since(w.db)
+    assert len(rows) == 1 and rows[0]["no_transaksi"] == "9002"

@@ -1,8 +1,9 @@
 """Watcher dialog Pembayaran: WinEventHook idle + save via pending. Read-only.
 
 Idle 99%: SetWinEventHook (CREATE/SHOW/HIDE/DESTROY), ~0% CPU.
-Aktif: baca UIA 250ms saat dialog terbuka; tutup + total>0 -> pending, simpan
-saat nomor transaksi muncul (poll global 75ms thread sendiri, tanpa batas waktu).
+Aktif: baca cepat total+tunai 250ms + full 1s saat dialog terbuka;
+tutup + total>0 -> pending, simpan
+saat nomor transaksi muncul (poll global 30ms cache-UIA thread sendiri, tanpa batas waktu).
 Tidak pernah klik/fokus/steal-foreground. Exception → log + silent.
 """
 import ctypes
@@ -12,14 +13,17 @@ import time
 from ctypes import wintypes
 
 from src.classify import classify
-from src.config import BURST_EVERY, ENUM_EVERY, NO_EVERY, READ_EVERY
+from src.config import BURST_EVERY, ENUM_EVERY, FULL_EVERY, NO_EVERY, READ_EVERY
 from src.db import init_db, insert_tx
 from src.parse import parse_no_transaksi, parse_nominal
 from src.pos_reader import (
     KETOKO_PROCESS_NAME,
     KETOKO_WINDOW_TITLE,
+    drop_dialog_cache,
+    drop_no_cache,
     get_window_process_name,
     read_dialog,
+    read_dialog_fast,
     read_no_transaksi,
 )
 
@@ -60,21 +64,29 @@ def _enum_ketoko():
     return out
 
 
-def _merge_snap(snap: dict, fresh: dict) -> dict:
-    """Merge hanya field non-empty (dialog sekarat baca kosong -> jangan timpa)."""
+def _merge_snap(snap: dict, fresh: dict) -> bool:
+    """Merge hanya field non-empty (dialog sekarat baca kosong -> jangan timpa).
+
+    Return True bila ada satu field yang tergabung (snapshot pernah terbaca).
+    """
+    merged = False
     for k, v in (fresh or {}).items():
         if v:
             snap[k] = v
-    return snap
+            merged = True
+    return merged
 
 
 class Watcher:
     """State machine per-hwnd + glue Win32. Reader/enum/clock injectable untuk test."""
 
     def __init__(self, db_path=None, read_dialog_fn=None, read_no_fn=None,
-                 enum_fn=None, clock=None):
+                  enum_fn=None, clock=None, read_dialog_fast_fn=None):
         self.db = init_db(db_path)
         self.read_dialog = read_dialog_fn or read_dialog
+        # ponytail: test inject read_dialog_fn saja -> fast pakai fake yang sama
+        # (hindari UIA asli ke hwnd fake); prod: fast = read_dialog_fast asli.
+        self.read_dialog_fast = read_dialog_fast_fn or read_dialog_fn or read_dialog_fast
         self.read_no = read_no_fn or read_no_transaksi
         self.enum = enum_fn or _enum_ketoko
         self.clock = clock or time.monotonic
@@ -94,7 +106,8 @@ class Watcher:
         if hwnd not in self.sessions:
             with self._lock:
                 self.pending = None  # sesi baru -> pending lama tak bernomor pasti basi, buang
-                self.sessions[hwnd] = {"main": main_hwnd, "snap": {}, "last_read": 0.0}
+                self.sessions[hwnd] = {"main": main_hwnd, "snap": {}, "last_read": 0.0,
+                                       "seen": False, "last_full": 0.0}
             return True
         return False
 
@@ -103,21 +116,30 @@ class Watcher:
             s = self.sessions.get(hwnd)
             if not s:
                 return
-            # Tutup: pakai snap memori (di-refresh tick tiap READ_EVERY).
-            # Fallback 1x read hanya bila snap masih kosong (dialog kilat <250ms
+            # Tutup: pakai snap memori (fast tiap READ_EVERY, full tiap FULL_EVERY).
+            # Fallback 1x read hanya bila snap masih kosong (dialog kilat
             # atau test open-langsung-close); jalur normal tetap zero-latency.
             self.sessions.pop(hwnd, None)
+            try:
+                drop_dialog_cache(hwnd)
+            except Exception:
+                pass
             snap = dict(s["snap"])
             main = s["main"]
+            seen = s.get("seen", False)
         total = parse_nominal(snap.get("total_raw") or "")
         if not total:
             try:
-                _merge_snap(snap, self.read_dialog(hwnd))
+                if _merge_snap(snap, self.read_dialog(hwnd)):
+                    seen = True
             except Exception:
                 pass
             total = parse_nominal(snap.get("total_raw") or "")
         if not total:
-            log.info("tutup hwnd=%s batal (total kosong)", hwnd)
+            if seen:
+                log.info("tutup hwnd=%s batal (total kosong)", hwnd)
+            else:
+                log.warning("tutup hwnd=%s gagal-baca (tak pernah terbaca)", hwnd)
             return
         with self._lock:
             self.pending = {"snap": snap, "main": main, "t": self.clock()}
@@ -144,7 +166,10 @@ class Watcher:
             self.sessions.pop(hwnd, None)
 
     def _tick_sessions(self, now):
-        """Refresh snap tiap READ_EVERY tanpa menahan lock saat UIA blocking."""
+        """Refresh snap tanpa menahan lock saat UIA blocking.
+
+        Fast (total+tunai) tiap READ_EVERY; full (bank/debit) tiap FULL_EVERY.
+        """
         for hwnd, s in list(self.sessions.items()):
             try:
                 due = now - s.get("last_read", 0.0) >= READ_EVERY
@@ -157,16 +182,19 @@ class Watcher:
                 if cur is None or now - cur.get("last_read", 0.0) < READ_EVERY:
                     continue
                 cur["last_read"] = now
+                full = now - cur.get("last_full", 0.0) >= FULL_EVERY
+                if full:
+                    cur["last_full"] = now
             try:
-                fresh = self.read_dialog(hwnd)
+                fresh = self.read_dialog(hwnd) if full else self.read_dialog_fast(hwnd)
             except Exception as e:
                 log.debug("read gagal hwnd=%s: %r", hwnd, e)
                 continue
             try:
                 with self._lock:
                     cur = self.sessions.get(hwnd)
-                    if cur is not None:
-                        _merge_snap(cur["snap"], fresh)
+                    if cur is not None and _merge_snap(cur["snap"], fresh):
+                        cur["seen"] = True
             except Exception as e:
                 log.debug("merge gagal hwnd=%s: %r", hwnd, e)
 
@@ -180,7 +208,10 @@ class Watcher:
         if not main:
             return
         try:
+            t0 = self.clock()
             no = self.read_no(main)
+            if self.clock() - t0 > 0.05:  # ponytail: bukti bila cache tak mempan
+                log.debug("read_no lambat %.2fs", self.clock() - t0)
         except Exception:
             return
         with self._lock:
@@ -238,7 +269,13 @@ class Watcher:
         except Exception:
             return
         main = next((h for h, t in wins if KETOKO_WINDOW_TITLE.lower() in t.lower()), 0)
-        self._main = main  # ponytail: cache untuk poll global tanpa sesi
+        if main != self._main:  # ponytail: main berganti (restart) -> cache nomor basi
+            if self._main:
+                try:
+                    drop_no_cache(self._main)
+                except Exception:
+                    pass
+            self._main = main  # ponytail: cache untuk poll global tanpa sesi
         seen = set()
         for hwnd, title in wins:
             if title == "Pembayaran":

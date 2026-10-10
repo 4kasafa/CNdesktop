@@ -1,7 +1,7 @@
 ; Installer CNdesktop (Inno Setup 6). Satu file Setup untuk PC kasir:
 ; EXE -> Program Files, autostart semua user, firewall TCP 8765, uninstaller.
 #define MyAppName "CNdesktop"
-#define MyAppVersion "1.2.1"
+#define MyAppVersion "1.2.2"
 #define MyAppExe "CNdesktop.exe"
 
 [Setup]
