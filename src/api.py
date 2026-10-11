@@ -37,6 +37,33 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def do_POST(self):
+        try:
+            path = urllib.parse.urlparse(self.path).path
+            if path != "/api/print":
+                return _send(self, 404, {"error": "not found"})
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (ValueError, TypeError):
+                length = 0
+            try:
+                data = json.loads(self.rfile.read(max(0, length)) or b"null")
+            except (ValueError, UnicodeDecodeError):
+                return _send(self, 400, {"error": "body harus JSON valid"})
+            if not isinstance(data, dict):
+                return _send(self, 400, {"error": "body harus objek JSON"})
+            from src.receipt import process_print_job
+            try:
+                out = process_print_job(data)
+            except ValueError as e:
+                return _send(self, 400, {"error": str(e)})
+            except Exception as e:
+                return _send(self, 500, {"error": str(e)})
+            return _send(self, 200, {"ok": True, "printer": out["printer"],
+                                     "total": out["total"]})
+        except BrokenPipeError:
+            pass
+
     def do_GET(self):
         try:
             path = urllib.parse.urlparse(self.path).path

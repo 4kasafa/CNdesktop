@@ -1,5 +1,6 @@
 """SQLite transaksi (PRD §5). Idempoten via UNIQUE(no_transaksi)."""
 import os
+import shutil
 import sqlite3
 
 from src.config import DB_FILE, app_dir
@@ -13,8 +14,23 @@ SCHEMA = """CREATE TABLE IF NOT EXISTS transactions(
   nontunai INTEGER NOT NULL DEFAULT 0,
   bank TEXT DEFAULT '',
   kategori TEXT NOT NULL CHECK(kategori IN ('Tunai','Nontunai','Split')),
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  created_at DATETIME DEFAULT (datetime('now','localtime'))
 )"""
+# ponytail: localtime agar jam tampil = jam toko (dulu CURRENT_TIMESTAMP = UTC)
+
+META_SCHEMA = """CREATE TABLE IF NOT EXISTS app_meta(
+  key TEXT PRIMARY KEY, value TEXT DEFAULT ''
+)"""
+
+
+CASHIERS_SCHEMA = """CREATE TABLE IF NOT EXISTS cashiers(
+  rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+  kasir_id TEXT DEFAULT '',
+  name TEXT NOT NULL,
+  branch TEXT DEFAULT '',
+  shift TEXT DEFAULT ''
+)"""
+# ponytail: kasir_id bebas duplikat (bukan data penting) -> alamat baris via rowid
 
 
 def _migrate(conn):
@@ -29,6 +45,16 @@ def _migrate(conn):
         conn.execute("UPDATE transactions SET no_urut = ? WHERE id = ?", (counter or "", tid))
 
 
+def _migrate_tz(conn):
+    """Geser baris era-UTC ke WIB (+7 jam), sekali saja (flag tz_fix_v1)."""
+    conn.execute(META_SCHEMA)
+    row = conn.execute("SELECT value FROM app_meta WHERE key='tz_fix_v1'").fetchone()
+    if row:
+        return
+    conn.execute("UPDATE transactions SET created_at = datetime(created_at, '+7 hours')")
+    conn.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('tz_fix_v1','1')")
+
+
 def default_path() -> str:
     return os.path.join(app_dir(), DB_FILE)
 
@@ -38,7 +64,9 @@ def init_db(path: str | None = None) -> str:
     path = path or default_path()
     with sqlite3.connect(path) as c:
         c.execute(SCHEMA)
+        c.execute(CASHIERS_SCHEMA)
         _migrate(c)
+        _migrate_tz(c)
     return path
 
 
@@ -64,3 +92,49 @@ def list_since(path: str, since: int = 0, limit: int = 50) -> list[dict]:
         return [dict(r) for r in c.execute(
             "SELECT * FROM transactions WHERE id > ? ORDER BY id ASC LIMIT ?",
             (since, limit))]
+
+
+def list_cashiers(path: str) -> list[dict]:
+    """Semua kasir ORDER BY rowid ASC. Tiap dict: rowid/kasir_id/name/branch/shift."""
+    with sqlite3.connect(path) as c:
+        c.row_factory = sqlite3.Row
+        return [dict(r) for r in c.execute(
+            "SELECT rowid, kasir_id, name, branch, shift FROM cashiers ORDER BY rowid ASC")]
+
+
+def save_cashier(path: str, name: str, kasir_id: str = "", branch: str = "",
+                 shift: str = "", rowid: int | None = None) -> int | None:
+    """Tambah (rowid None) atau edit (rowid ada). Return rowid, None jika nama kosong."""
+    name = (name or "").strip()
+    if not name:
+        return None
+    with sqlite3.connect(path) as c:
+        if rowid is None:
+            cur = c.execute(
+                "INSERT INTO cashiers(kasir_id,name,branch,shift) VALUES(?,?,?,?)",
+                (kasir_id or "", name, branch or "", shift or ""))
+            return cur.lastrowid
+        c.execute("UPDATE cashiers SET kasir_id=?,name=?,branch=?,shift=? WHERE rowid=?",
+                  (kasir_id or "", name, branch or "", shift or "", rowid))
+        return rowid
+
+
+def delete_cashier(path: str, rowid: int) -> None:
+    with sqlite3.connect(path) as c:
+        c.execute("DELETE FROM cashiers WHERE rowid=?", (rowid,))
+
+
+def clear_transactions(path: str, backup: bool = True) -> tuple:
+    """Hapus SEMUA transaksi. Backup file dulu bila diminta.
+
+    Return (n_hapus, backup_path|None)."""
+    backup_path = None
+    if backup:
+        from datetime import datetime as _dt
+        stamp = _dt.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = os.path.join(
+            app_dir(), f"{os.path.basename(path)}.bak-{stamp}")
+        shutil.copy(path, backup_path)
+    with sqlite3.connect(path) as c:
+        cur = c.execute("DELETE FROM transactions")
+        return cur.rowcount, backup_path

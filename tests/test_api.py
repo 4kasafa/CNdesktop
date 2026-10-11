@@ -71,3 +71,61 @@ def test_cors_on_400():
     code, _, h = _get("/api/transactions?since=abc")
     assert code == 400
     assert h["Access-Control-Allow-Origin"] == "*"
+
+
+def _post(path, obj=None, raw=None):
+    data = raw if raw is not None else json.dumps(obj or {}).encode()
+    req = urllib.request.Request(BASE + path, data=data, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        return e.code, json.load(e)
+
+
+def _job():
+    return {"kasir": "Surjo", "branch": "Cabang A", "shift": "Pagi",
+            "user_id": "K01", "qty": {"100000": 2, "5000": 1},
+            "expense_amount": 10000, "expense_note": "Potongan", "size": "58"}
+
+
+def test_print_ok_mock_sender(monkeypatch):
+    import src.receipt as rcpt
+    kirim = []
+    monkeypatch.setattr(rcpt, "send_to_printer",
+                        lambda p: kirim.append(p) or "MockPrinter")
+    code, body = _post("/api/print", _job())
+    assert code == 200
+    assert body == {"ok": True, "printer": "MockPrinter", "total": 205000}
+    assert b"Surjo" in kirim[0]
+
+
+def test_print_validasi_400():
+    code, body = _post("/api/print", _job() | {"kasir": ""})
+    assert code == 400 and "error" in body
+    code, body = _post("/api/print", _job() | {"qty": {}})
+    assert code == 400 and "error" in body
+
+
+def test_print_malformed_400():
+    code, body = _post("/api/print", raw=b"{bukan json")
+    assert code == 400 and "error" in body
+    code, body = _post("/api/print", raw=b"[1,2]")
+    assert code == 400 and "error" in body
+
+
+def test_print_printer_gagal_500(monkeypatch):
+    import src.receipt as rcpt
+
+    def rusak(p):
+        raise RuntimeError("printer macet")
+
+    monkeypatch.setattr(rcpt, "send_to_printer", rusak)
+    code, body = _post("/api/print", _job())
+    assert code == 500 and "macet" in body["error"]
+
+
+def test_print_unknown_path_404():
+    code, body = _post("/api/other", {})
+    assert code == 404

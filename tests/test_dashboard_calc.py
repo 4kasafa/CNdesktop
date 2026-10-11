@@ -8,6 +8,8 @@ from datetime import datetime
 from src.dashboard import (
     ARABIC_ESC_POS_IMAGE_B64,
     DENOMINATIONS,
+    KASIR_EMPTY,
+    KASIR_PLACEHOLDER,
     build_escpos_arabic_image,
     build_escpos_receipt,
     build_receipt_text,
@@ -85,3 +87,21 @@ def test_escpos_receipt_tanpa_simpan():
     assert p[:2] == b"\x1b@"  # init printer
     assert build_escpos_arabic_image() in p  # arab via gambar, bukan teks
     assert "calculate_history".encode() not in p  # tanpa simpan history
+
+
+def test_struk_identitas_kasir_asli():
+    t = _struk(kasir="Surjo", branch="Cabang A", shift="Pagi", user_id="K01")
+    assert "Surjo" in t and "Cabang A" in t and "Pagi" in t and "K01" in t
+
+
+def test_struk_identitas_default_strip():
+    t = _struk()
+    for label in ("Cabang", "Shift", "User ID"):
+        line = next(l for l in t.splitlines() if label in l)
+        assert line.rstrip().endswith("-")
+
+
+def test_validasi_placeholder_ditolak():
+    # kasir_name() memetakan placeholder dropdown -> "" sebelum validate_calc
+    assert KASIR_PLACEHOLDER and KASIR_EMPTY
+    assert validate_calc("", 100) is not None

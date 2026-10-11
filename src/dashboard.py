@@ -2,25 +2,19 @@
 
 Pola meniru cash_note tabs/calculate_tab.py: satu window berisi view yang
 ditukar (input <-> preview), admin dibuka via Ctrl+Shift+Alt+D.
-Tanpa Total Sistem (Non Tunai ditulis Rp 0), kasir teks bebas,
+Tanpa Total Sistem (Non Tunai ditulis Rp 0); kasir dropdown dari tabel
+SQLite cashiers + tombol Kasir membuka modal kelola (tambah/edit/hapus);
 preview + Cetak TANPA simpan, sesudah cetak nilai tetap diam di preview.
 """
-import base64
 import ctypes
 import os
 import sqlite3
 import tempfile
-import textwrap
 from ctypes import wintypes
 from datetime import datetime
 from tkinter import messagebox, ttk
 
 import customtkinter as ctk
-
-try:
-    import win32print  # type: ignore
-except ImportError:
-    win32print = None
 
 ctk.set_appearance_mode("light")
 ctk.set_default_color_theme("blue")
@@ -37,165 +31,12 @@ HEADER_FONT = ("Segoe UI", 16, "bold")
 MAIN_FONT = ("Segoe UI", 11)
 SMALL_FONT = ("Segoe UI", 10)
 
-DENOMINATIONS = [100000, 75000, 50000, 20000, 10000, 5000, 2000, 1000, 500, 200, 100]
-DEFAULT_KASIR = "Kasir-1"
-
-ARABIC_RECEIPT_TEXT = '"شكراً جزيلاً"'
-ARABIC_ESC_POS_IMAGE_B64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPgAAAAAAAAHwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD4AAAAAAAAAHwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD4AAAAAAAAB8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPeAAcAAAAAAABwAAAAgAAHvAAAAAAAAAAAAAAAAAAAAAAAAAAAA95+BwAAAAAAAHAAAAOAAAe8AAAAAAAAAAAAAAAAAAAAAAAAAAAD3h4HAAAAAAAAcAAAD4AAB7wAAAAAAAAAAAAAAAAAAAAAAAAAAAPeDwcAAAAAAABwAAA/AAAHvAAAAAAAAAAAAAAAAAAAAAAAAAAAA94HhwAAAAAAAHAAAPwAAAe8AAAAAAAAAAAAAAAAAAAAAAAAAAAD3gPHAAAAAAAAcAAD8AA4B7wAAAAAAAAAAAAAAAAAAAAAAAAAAAHcAecAAAAAAABwAAPgADgDuAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB5wAAAAAAAHAAA8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD3AAAAH4AAcAAD4ADuAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHcAADwf4ABwAAHwAO4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfwOAPB/wAHAAAPgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/A4AAAfwAcAAAPAAA4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD8DgAAAPgBwAAAeAADgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPwOAPgAPAHAB4A8AAOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB/A4AeAB8AcADwB4c84AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPcDgA4B/wBwAHADhzzgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB5weADw//AHAAcAfPPOAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPn/4AP//wAcAB/////4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB8f/AA//wABwAH/////gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAPg/4AD/wAAHAAf/9//8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAeAAAAAADwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAcAAAAeAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD+B/ABwAAAP4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP5/4AAAAAP/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH/AAAAAA/wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfgAAAAAD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
-ARABIC_ESC_POS_IMAGE_WIDTH = 300
-ARABIC_ESC_POS_IMAGE_HEIGHT = 80
-ARABIC_ESC_POS_IMAGE_BYTES_PER_ROW = 38
-
-
-# --- fungsi murni (tanpa GUI, bisa unit-test) ---
-
-def format_rp(n) -> str:
-    return f"Rp {int(n):,}".replace(",", ".")
-
-
-def hitung_total(qty: dict) -> int:
-    """Total fisik = sum(qty[denom] * denom). qty boleh str/int/kosong."""
-    total = 0
-    for d in DENOMINATIONS:
-        try:
-            total += int(qty.get(d, 0) or 0) * d
-        except (ValueError, TypeError):
-            pass
-    return total
-
-
-def validate_calc(kasir_name: str, total: int) -> str | None:
-    """Return pesan error, atau None jika valid (mirip show_preview cash_note)."""
-    if not (kasir_name or "").strip():
-        return "Silakan isi nama kasir terlebih dahulu."
-    if total == 0:
-        return "Total perhitungan tidak boleh nol."
-    return None
-
-
-def format_key_value_line(label, value, width):
-    left, right = str(label), str(value)
-    space = width - len(left) - len(right)
-    if space < 1:
-        return f"{left} {right}"
-    return f"{left}{' ' * space}{right}"
-
-
-def format_amount_line(label, amount, width):
-    right = f"Rp {amount:,}".replace(",", ".")
-    space = width - len(label) - len(right)
-    if space < 2:
-        words = label.split(" ", 1)
-        if len(words) == 2:
-            first, rest = words
-            space1 = width - len(first) - len(right)
-            if space1 >= 1:
-                return f"{first}{' ' * space1}{right}\n{rest}"
-        return f"{label} {right}"
-    return f"{label}{' ' * space}{right}"
-
-
-def add_receipt_margin(lines, width, margin=2):
-    inner_width = max(width - (margin * 2), 10)
-    pad = " " * margin
-    padded = []
-    for line in lines:
-        if not line:
-            padded.append("")
-            continue
-        padded.append(f"{pad}{line[:inner_width].ljust(inner_width)}{pad}")
-    return padded, inner_width
-
-
-def build_receipt_text(*, kasir, qty, expense_amount=0, expense_note="", width, now=None):
-    """Struk ala cash_note; Cabang/Shift/UserID '-', Non Tunai Rp 0 (tanpa sistem)."""
-    now = now or datetime.now()
-    margin = 2
-    inner_width = max(width - (margin * 2), 10)
-    physical_lines = []
-    physical_total = 0
-    for denom in DENOMINATIONS:
-        try:
-            q = int(qty.get(denom, 0) or 0)
-        except (ValueError, TypeError):
-            q = 0
-        if q > 0:
-            subtotal = q * denom
-            physical_total += subtotal
-            left = f"{denom:,} x {q}".replace(",", ".")
-            right = f"Rp {subtotal:,}".replace(",", ".")
-            space = inner_width - len(left) - len(right)
-            if space < 1:
-                physical_lines.append(left)
-                physical_lines.append(right.rjust(inner_width))
-            else:
-                physical_lines.append(f"{left}{' ' * space}{right}")
-
-    non_cash_total = 0  # ponytail: tanpa Total Sistem, ditulis Rp 0
-    sales_total = physical_total + non_cash_total + expense_amount
-
-    lines = []
-    lines.append("TOKO LAY".center(inner_width))
-    lines.append("Laporan Penjualan".center(inner_width))
-    lines.append("-" * inner_width)
-    lines.append(format_key_value_line("Tanggal", now.strftime('%d/%m/%Y'), inner_width))
-    lines.append(format_key_value_line("Cabang", "-", inner_width))
-    lines.append(format_key_value_line("Shift", "-", inner_width))
-    lines.append(format_key_value_line("Kasir", kasir, inner_width))
-    lines.append(format_key_value_line("User ID", "-", inner_width))
-    lines.append("-" * inner_width)
-    for sub in format_amount_line("Total Penjualan", sales_total, inner_width).split("\n"):
-        lines.append(sub)
-    lines.append(format_amount_line("Non Tunai", non_cash_total, inner_width))
-    lines.append(format_amount_line("Pengeluaran", expense_amount, inner_width))
-    lines.append("-" * inner_width)
-    lines.append("-- Rincian Uang Fisik --".center(inner_width))
-    lines.extend(physical_lines)
-    lines.append("-" * inner_width)
-    lines.append(format_amount_line("TOTAL FISIK", physical_total, inner_width))
-    lines.append("-" * inner_width)
-    if (expense_note or "").strip():
-        first = True
-        for raw in expense_note.strip().splitlines():
-            prefix = "Ket: " if first else ""
-            first = False
-            for w in textwrap.wrap(f"{prefix}{raw}".strip(), width=inner_width):
-                lines.append(w.center(inner_width))
-    lines.append(now.strftime('%d/%m/%Y %H:%M:%S').center(inner_width))
-    lines.append(ARABIC_RECEIPT_TEXT.center(inner_width))
-    lines, _ = add_receipt_margin(lines, width, margin)
-    return "\n".join(lines)
-
-
-def build_escpos_arabic_image():
-    image_bytes = base64.b64decode(ARABIC_ESC_POS_IMAGE_B64)
-    header = bytearray()
-    header.extend(b"\x1b\x61\x01")
-    header.extend(
-        b"\x1d\x76\x30\x00"
-        + bytes([ARABIC_ESC_POS_IMAGE_BYTES_PER_ROW & 0xFF,
-                 (ARABIC_ESC_POS_IMAGE_BYTES_PER_ROW >> 8) & 0xFF])
-        + bytes([ARABIC_ESC_POS_IMAGE_HEIGHT & 0xFF,
-                 (ARABIC_ESC_POS_IMAGE_HEIGHT >> 8) & 0xFF])
-    )
-    return bytes(header) + image_bytes + b"\n\x1b\x61\x00"
-
-
-def build_escpos_receipt(receipt_text):
-    payload = bytearray()
-    payload.extend(b"\x1b@")
-    payload.extend(b"\x1b\x61\x00")
-    for line in receipt_text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            payload.extend(b"\n")
-            continue
-        if stripped == ARABIC_RECEIPT_TEXT:
-            payload.extend(build_escpos_arabic_image())
-        else:
-            payload.extend(line.encode("ascii", errors="replace") + b"\n")
-    payload.extend(b"\n")
-    return bytes(payload)
+from src.receipt import (  # ponytail: murni headless, dipakai api juga + re-ekspor test
+    ARABIC_ESC_POS_IMAGE_B64, DENOMINATIONS, KASIR_EMPTY, KASIR_PLACEHOLDER,
+    build_escpos_arabic_image, build_escpos_receipt, build_receipt_text,
+    format_rp, hitung_total, print_width, process_print_job, validate_calc,
+)
+from src import receipt
 
 
 # --- fungsi lama (dipakai admin_view, logika tak berubah) ---
@@ -309,6 +150,11 @@ class Dashboard:
         self.expense_note = ""
         self.vcmd = (self.root.register(self.validate_numeric), "%P")
         self.print_size_var = ctk.StringVar(value="58")
+        self.cashier_var = ctk.StringVar(value=KASIR_PLACEHOLDER)
+        self.cashiers = []  # list dict rowid/kasir_id/name/branch/shift (SQLite)
+        self.active_cashier = None
+        self._editing_rowid = None
+        self.kasir_dialog = None
 
         self._build()
         # Ctrl+Shift+Alt+D (juga tanpa Shift): buka/tutup admin tersembunyi.
@@ -338,6 +184,7 @@ class Dashboard:
 
     def _show_calc_ui(self):
         self._refresh_date()
+        self.load_cashiers()
         self._show_only(self.input_view)
         self.root.deiconify()
         self.root.lift()
@@ -395,11 +242,22 @@ class Dashboard:
         self.lbl_date.pack(side="left")
         self._refresh_date()
 
-        self.ent_kasir = ctk.CTkEntry(header, height=38, font=("Segoe UI", 11),
-                                      fg_color=CONSOLE_COLOR, border_color=BORDER_COLOR,
-                                      text_color=TEXT_COLOR, corner_radius=10)
-        self.ent_kasir.pack(pady=(0, 8), padx=20, fill="x")
-        self.ent_kasir.insert(0, DEFAULT_KASIR)
+        kasir_row = ctk.CTkFrame(header, fg_color="transparent")
+        kasir_row.pack(fill="x", padx=20, pady=(0, 8))
+        self.cashier_menu = ctk.CTkOptionMenu(
+            kasir_row, variable=self.cashier_var, values=[KASIR_PLACEHOLDER],
+            fg_color=SIDEBAR_COLOR, text_color=TEXT_COLOR,
+            button_color="#f0f0f0", button_hover_color="#e0e0e0",
+            dropdown_fg_color=SIDEBAR_COLOR, dropdown_text_color=TEXT_COLOR,
+            dropdown_hover_color="#f5f5f5", corner_radius=10, anchor="w",
+            height=38, font=("Segoe UI", 11), command=self.on_select_cashier)
+        self.cashier_menu.pack(side="left", fill="x", expand=True)
+        ctk.CTkButton(kasir_row, text="Kasir", width=80, height=38,
+                      fg_color=ACCENT_COLOR, hover_color="#375a7f",
+                      text_color="white", corner_radius=10,
+                      font=("Segoe UI", 11, "bold"),
+                      command=self.show_kasir_modal).pack(side="left", padx=(8, 0))
+        self.load_cashiers()
 
         self.expense_container = ctk.CTkFrame(header, fg_color="transparent")
         self.expense_container.pack(fill="x", padx=20, pady=(0, 12))
@@ -524,6 +382,11 @@ class Dashboard:
                       command=self.refresh).pack(side="left")
         ctk.CTkButton(row1, text="Buka Log",
                       command=self.open_log).pack(side="left", padx=8)
+        row2 = ctk.CTkFrame(bot, fg_color="transparent")
+        row2.pack(fill="x", padx=8, pady=(0, 8))
+        ctk.CTkButton(row2, text="Hapus Transaksi", fg_color="#d32f2f",
+                      hover_color="#b71c1c", text_color="white",
+                      command=self.confirm_clear_transactions).pack(side="left")
         self.txt_test = ctk.CTkTextbox(bot, height=90)
         self.txt_test.pack(fill="x", padx=8, pady=(0, 8))
 
@@ -553,11 +416,49 @@ class Dashboard:
         self.subtotal_labels[denom].configure(text=format_rp(qty * denom))
         self.lbl_grand_total.configure(text=format_rp(hitung_total(self._qty_map())))
 
-    def kasir_name(self) -> str:
+    # --- kasir (dropdown SQLite + modal kelola) ---
+
+    def load_cashiers(self):
+        from src.db import list_cashiers
         try:
-            return self.ent_kasir.get().strip()
+            self.cashiers = list_cashiers(self.db_path)
         except Exception:
+            self.cashiers = []
+        names = [c["name"] for c in self.cashiers]
+        try:
+            if names:
+                self.cashier_menu.configure(values=names)
+                if self.cashier_var.get() not in names:
+                    self.cashier_var.set(KASIR_PLACEHOLDER)
+            else:
+                self.cashier_menu.configure(values=[KASIR_EMPTY])
+                self.cashier_var.set(KASIR_EMPTY)
+        except Exception:
+            pass
+        self._sync_active_cashier()
+
+    def on_select_cashier(self, name):
+        self._sync_active_cashier()
+
+    def _sync_active_cashier(self):
+        sel = self.cashier_var.get()
+        # ponytail: nama boleh kembar -> cocok pertama menang
+        self.active_cashier = next((c for c in self.cashiers if c["name"] == sel),
+                                   None)
+
+    def kasir_name(self) -> str:
+        if self.cashier_var.get() in (KASIR_PLACEHOLDER, KASIR_EMPTY):
             return ""
+        ac = self.active_cashier
+        return (ac["name"] if ac else "").strip()
+
+    def receipt_identity(self) -> tuple:
+        """(kasir, branch, shift, user_id) untuk struk; default '-'."""
+        ac = self.active_cashier
+        if not ac:
+            return ("-", "-", "-", "-")
+        return (ac["name"] or "-", ac.get("branch") or "-",
+                ac.get("shift") or "-", ac.get("kasir_id") or "-")
 
     def show_preview(self):
         err = validate_calc(self.kasir_name(), hitung_total(self._qty_map()))
@@ -570,6 +471,182 @@ class Dashboard:
     def show_input_view(self):
         self._show_only(self.input_view)
 
+    # --- modal kelola kasir (mirip UserTab cash_note: list <-> form) ---
+
+    def show_kasir_modal(self):
+        try:
+            if self.kasir_dialog is not None and self.kasir_dialog.winfo_exists():
+                self.kasir_dialog.lift()
+                self.kasir_dialog.focus()
+                return
+        except Exception:
+            pass
+        from src.db import list_cashiers
+        try:
+            self.cashiers = list_cashiers(self.db_path)
+        except Exception:
+            self.cashiers = []
+        dialog = ctk.CTkToplevel(self.root)
+        self.kasir_dialog = dialog
+        dialog.title("Kelola Kasir")
+        dialog.geometry("380x480")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.update_idletasks()
+        x = self.root.winfo_rootx() + (self.root.winfo_width() - 380) // 2
+        y = self.root.winfo_rooty() + (self.root.winfo_height() - 480) // 2
+        dialog.geometry(f"+{max(0, x)}+{max(0, y)}")
+        dialog.protocol("WM_DELETE_WINDOW", self.close_kasir_modal)
+        dialog.bind("<Escape>", lambda e: self.close_kasir_modal())
+
+        self.kasir_list_view = ctk.CTkFrame(dialog, fg_color="transparent")
+        self.kasir_list_view.pack(fill="both", expand=True)
+        top = ctk.CTkFrame(self.kasir_list_view, fg_color="transparent")
+        top.pack(fill="x", padx=20, pady=(15, 5))
+        ctk.CTkLabel(top, text="Data Kasir", font=HEADER_FONT,
+                     text_color=TEXT_COLOR).pack(side="left")
+        ctk.CTkButton(top, text="+ Tambah", width=100, height=30,
+                      fg_color=ACCENT_COLOR, hover_color="#375a7f",
+                      text_color="white", corner_radius=6, font=SMALL_FONT,
+                      command=self.show_kasir_add_form).pack(side="right")
+        self.kasir_scroll = ctk.CTkScrollableFrame(
+            self.kasir_list_view, fg_color=CONSOLE_COLOR, border_width=1,
+            border_color=BORDER_COLOR, corner_radius=0)
+        self.kasir_scroll.pack(fill="both", expand=True, padx=20, pady=(5, 10))
+        ctk.CTkButton(self.kasir_list_view, text="Tutup", fg_color="#666666",
+                      text_color="white", corner_radius=5,
+                      command=self.close_kasir_modal).pack(fill="x", padx=20,
+                                                           pady=(0, 15))
+
+        self.kasir_form_view = ctk.CTkFrame(dialog, fg_color="transparent")
+        self.kasir_form_title = ctk.CTkLabel(self.kasir_form_view,
+                                             text="Tambah Kasir",
+                                             font=HEADER_FONT, text_color=ACCENT_COLOR)
+        self.kasir_form_title.pack(pady=(15, 10))
+        self.kasir_entries = {}
+        for label, key in (("Nama Kasir:", "name"), ("ID Kasir:", "kasir_id"),
+                           ("Cabang:", "branch"), ("Shift:", "shift")):
+            f = ctk.CTkFrame(self.kasir_form_view, fg_color="transparent")
+            f.pack(fill="x", padx=40, pady=4)
+            ctk.CTkLabel(f, text=label, font=("Segoe UI", 11, "bold"),
+                         text_color=TEXT_COLOR).pack(anchor="w")
+            ent = ctk.CTkEntry(f, fg_color=CONSOLE_COLOR, border_color=BORDER_COLOR,
+                               corner_radius=5)
+            ent.pack(fill="x", pady=(2, 0))
+            self.kasir_entries[key] = ent
+        btn_box = ctk.CTkFrame(self.kasir_form_view, fg_color="transparent")
+        btn_box.pack(fill="x", padx=40, pady=25)
+        ctk.CTkButton(btn_box, text="Simpan", fg_color=ACCENT_COLOR,
+                      text_color="white", corner_radius=5,
+                      command=self.save_kasir_form).pack(side="left", expand=True,
+                                                        padx=5)
+        ctk.CTkButton(btn_box, text="Batal", fg_color="#666666",
+                      text_color="white", corner_radius=5,
+                      command=self.show_kasir_list).pack(side="left", expand=True,
+                                                        padx=5)
+        self.refresh_kasir_list()
+
+    def close_kasir_modal(self):
+        try:
+            if self.kasir_dialog is not None and self.kasir_dialog.winfo_exists():
+                self.kasir_dialog.destroy()
+        except Exception:
+            pass
+        self.kasir_dialog = None
+        self.load_cashiers()
+
+    def show_kasir_list(self):
+        self.kasir_form_view.pack_forget()
+        self.kasir_list_view.pack(fill="both", expand=True)
+        self.refresh_kasir_list()
+
+    def refresh_kasir_list(self):
+        from src.db import list_cashiers
+        try:
+            self.cashiers = list_cashiers(self.db_path)
+        except Exception:
+            self.cashiers = []
+        for w in self.kasir_scroll.winfo_children():
+            w.destroy()
+        if not self.cashiers:
+            ctk.CTkLabel(self.kasir_scroll, text="Belum ada data kasir.",
+                         font=MAIN_FONT, text_color="grey").pack(pady=20)
+            return
+        for c in self.cashiers:
+            row = ctk.CTkFrame(self.kasir_scroll, fg_color="white", border_width=1,
+                               border_color=BORDER_COLOR, corner_radius=5)
+            row.pack(fill="x", pady=5, padx=5)
+            info = ctk.CTkFrame(row, fg_color="transparent")
+            info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
+            ctk.CTkLabel(info, text=c["name"], font=("Segoe UI", 12, "bold"),
+                         text_color=TEXT_COLOR, anchor="w").pack(fill="x")
+            ctk.CTkLabel(
+                info,
+                text=f"ID: {c['kasir_id'] or '-'} | Cabang: {c['branch'] or '-'}"
+                     f" | Shift: {c['shift'] or '-'}",
+                font=("Segoe UI", 9), text_color="grey", anchor="w").pack(fill="x")
+            btns = ctk.CTkFrame(row, fg_color="transparent")
+            btns.pack(side="right", padx=10)
+            ctk.CTkButton(btns, text="Edit", width=50, height=25, corner_radius=5,
+                          font=SMALL_FONT, fg_color="#f5f5f5", text_color="black",
+                          command=lambda r=c["rowid"]: self.show_kasir_edit_form(r)
+                          ).pack(side="left", padx=2)
+            ctk.CTkButton(btns, text="Hapus", width=50, height=25, corner_radius=5,
+                          font=SMALL_FONT, fg_color="#ffebee", text_color="#d32f2f",
+                          hover_color="#ffcdd2",
+                          command=lambda r=c["rowid"],
+                          n=c["name"]: self.delete_kasir(r, n)
+                          ).pack(side="left", padx=2)
+
+    def show_kasir_add_form(self):
+        self._editing_rowid = None
+        self.kasir_form_title.configure(text="Tambah Kasir")
+        for ent in self.kasir_entries.values():
+            ent.delete(0, "end")
+        self.kasir_list_view.pack_forget()
+        self.kasir_form_view.pack(fill="both", expand=True)
+
+    def show_kasir_edit_form(self, rowid):
+        c = next((x for x in self.cashiers if x["rowid"] == rowid), None)
+        if not c:
+            return
+        self._editing_rowid = rowid
+        self.kasir_form_title.configure(text="Edit Kasir")
+        for key, ent in self.kasir_entries.items():
+            ent.delete(0, "end")
+            ent.insert(0, c.get(key) or "")
+        self.kasir_list_view.pack_forget()
+        self.kasir_form_view.pack(fill="both", expand=True)
+
+    def save_kasir_form(self):
+        from src.db import save_cashier
+        vals = {k: e.get().strip() for k, e in self.kasir_entries.items()}
+        if not vals["name"]:
+            messagebox.showwarning("Peringatan", "Nama kasir wajib diisi.")
+            return
+        rowid = save_cashier(self.db_path, vals["name"], vals["kasir_id"],
+                             vals["branch"], vals["shift"],
+                             rowid=self._editing_rowid)
+        if rowid is None:
+            messagebox.showwarning("Peringatan", "Nama kasir wajib diisi.")
+            return
+        self._editing_rowid = None
+        self.load_cashiers()
+        try:
+            self.cashier_var.set(vals["name"])
+            self._sync_active_cashier()
+        except Exception:
+            pass
+        self.show_kasir_list()
+
+    def delete_kasir(self, rowid, name):
+        from src.db import delete_cashier
+        if messagebox.askyesno("Konfirmasi", f"Hapus kasir '{name}'?"):
+            delete_cashier(self.db_path, rowid)
+            self.load_cashiers()
+            self.refresh_kasir_list()
+
     def get_receipt_char_width(self, for_print=False):
         size = self.print_size_var.get()
         if for_print:
@@ -579,49 +656,44 @@ class Dashboard:
     def update_receipt_preview(self):
         size = self.print_size_var.get()
         self.receipt_paper.configure(width=280 if size == "58" else 420)
+        kasir, branch, shift, user_id = self.receipt_identity()
         self.lbl_receipt_text.configure(text=build_receipt_text(
-            kasir=self.kasir_name() or DEFAULT_KASIR, qty=self._qty_map(),
+            kasir=kasir, branch=branch, shift=shift, user_id=user_id,
+            qty=self._qty_map(),
             expense_amount=self.expense_amount, expense_note=self.expense_note,
             width=self.get_receipt_char_width(for_print=False)))
 
     def cetak(self):
-        """Cetak ala cash_note save_and_print, TANPA simpan; diam di preview."""
-        char_width = self.get_receipt_char_width(for_print=True)
-        receipt_text = build_receipt_text(
-            kasir=self.kasir_name() or DEFAULT_KASIR, qty=self._qty_map(),
-            expense_amount=self.expense_amount, expense_note=self.expense_note,
-            width=char_width)
-        if win32print:
-            try:
-                printer_name = win32print.GetDefaultPrinter()
-                if not printer_name:
-                    raise Exception("Printer default tidak ditemukan. "
-                                    "Silakan set printer di Windows.")
-                hPrinter = win32print.OpenPrinter(printer_name)
-                try:
-                    win32print.StartDocPrinter(hPrinter, 1, ("Struk Kasir", None, "RAW"))
-                    try:
-                        win32print.StartPagePrinter(hPrinter)
-                        win32print.WritePrinter(hPrinter,
-                                                build_escpos_receipt(receipt_text))
-                        win32print.EndPagePrinter(hPrinter)
-                    finally:
-                        win32print.EndDocPrinter(hPrinter)
-                finally:
-                    win32print.ClosePrinter(hPrinter)
-                messagebox.showinfo("Sukses", f"Data berhasil dicetak ke {printer_name}")
-            except Exception as e:
-                messagebox.showerror("Error Cetak", f"Gagal mencetak: {e}")
-        else:
-            messagebox.showwarning("Modul Hilang", "Modul win32print tidak terdeteksi. "
-                                                   "Menggunakan metode sistem...")
+        """Tombol Cetak: tanpa simpan; diam di preview."""
+        if receipt.win32print is None:
+            messagebox.showwarning("Modul Hilang",
+                                   "Modul win32print tidak terdeteksi. "
+                                   "Menggunakan metode sistem...")
             fd, path = tempfile.mkstemp(suffix=".txt")
             try:
+                kasir, branch, shift, user_id = self.receipt_identity()
                 with os.fdopen(fd, 'w', encoding='utf-8') as tmp:
-                    tmp.write(receipt_text)
+                    tmp.write(build_receipt_text(
+                        kasir=kasir, branch=branch, shift=shift, user_id=user_id,
+                        qty=self._qty_map(), expense_amount=self.expense_amount,
+                        expense_note=self.expense_note,
+                        width=self.get_receipt_char_width(for_print=True)))
                 os.startfile(path, "print")
             except Exception as e:
                 messagebox.showerror("Error Cetak", f"Gagal mengirim ke printer: {e}")
+            return
+        ac = self.active_cashier or {}
+        try:
+            out = process_print_job({
+                "kasir": self.kasir_name(), "branch": ac.get("branch") or "-",
+                "shift": ac.get("shift") or "-", "user_id": ac.get("kasir_id") or "-",
+                "qty": self._qty_map(), "expense_amount": self.expense_amount,
+                "expense_note": self.expense_note,
+                "size": self.print_size_var.get()})
+        except (ValueError, RuntimeError) as e:
+            messagebox.showerror("Error Cetak", str(e))
+            return
+        messagebox.showinfo("Sukses", f"Data berhasil dicetak ke {out['printer']}")
         # ponytail: nilai tetap + diam di preview (keputusan ronde 3/4)
 
     def clear_all(self):
@@ -806,6 +878,63 @@ class Dashboard:
         for k in ("total_raw", "tunai_raw", "debit_raw", "bank_raw", "_note", "error"):
             if k in out:
                 self.txt_test.insert("end", f"{k} = {out[k]!r}\n")
+
+    def confirm_clear_transactions(self):
+        from src.db import clear_transactions
+        try:
+            with sqlite3.connect(self.db_path) as c:
+                n = c.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        except Exception:
+            n = "?"
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Hapus Transaksi")
+        dialog.geometry("360x220")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        box = ctk.CTkFrame(dialog, fg_color="transparent")
+        box.pack(fill="both", expand=True, padx=20, pady=15)
+        ctk.CTkLabel(box, text=f"Hapus {n} transaksi?\nBackup otomatis dibuat dulu.",
+                     font=MAIN_FONT, text_color=TEXT_COLOR,
+                     justify="left").pack(anchor="w", pady=(0, 8))
+        ctk.CTkLabel(box, text='Ketik HAPUS untuk lanjut:',
+                     font=("Segoe UI", 11, "bold"),
+                     text_color=TEXT_COLOR).pack(anchor="w")
+        entry = ctk.CTkEntry(box, fg_color=CONSOLE_COLOR,
+                             border_color=BORDER_COLOR, corner_radius=5)
+        entry.pack(fill="x", pady=(4, 12))
+        entry.focus()
+
+        def on_ok(event=None):
+            if entry.get().strip() != "HAPUS":
+                return  # ponytail: salah ketik = batal diam-diam
+            dialog.destroy()
+            try:
+                count, bak = clear_transactions(self.db_path, backup=True)
+            except Exception as e:
+                messagebox.showerror("Gagal", f"Hapus gagal: {e}")
+                return
+            import logging
+            logging.getLogger("cndesktop").warning(
+                "clear transaksi: %s baris, backup %s", count, bak)
+            self.refresh()
+            messagebox.showinfo("Selesai",
+                                f"{count} transaksi dihapus.\nBackup: {bak}")
+
+        def on_cancel(event=None):
+            dialog.destroy()
+
+        entry.bind("<Return>", on_ok)
+        dialog.bind("<Escape>", on_cancel)
+        row = ctk.CTkFrame(box, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkButton(row, text="Hapus", fg_color="#d32f2f",
+                      hover_color="#b71c1c", text_color="white", corner_radius=5,
+                      command=on_ok).pack(side="left", expand=True, padx=(0, 4))
+        ctk.CTkButton(row, text="Batal", fg_color="#666666",
+                      text_color="white", corner_radius=5,
+                      command=on_cancel).pack(side="left", expand=True,
+                                              padx=(4, 0))
 
     def refresh(self):
         try:
