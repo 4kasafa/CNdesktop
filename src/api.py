@@ -8,11 +8,18 @@ from src.config import PORT
 from src.db import list_since
 
 
+def _cors(h):
+    h.send_header("Access-Control-Allow-Origin", "*")
+    h.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    h.send_header("Access-Control-Allow-Headers", "Content-Type, X-Token")
+
+
 def _send(h, code, obj):
     body = json.dumps(obj).encode()
     h.send_response(code)
     h.send_header("Content-Type", "application/json")
     h.send_header("Cache-Control", "no-store")
+    _cors(h)
     h.send_header("Content-Length", str(len(body)))
     h.end_headers()
     h.wfile.write(body)
@@ -23,6 +30,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *a):
         pass  # ponytail: silent, logging terpusat Fase 6
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        _cors(self)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_GET(self):
         try:

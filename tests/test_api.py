@@ -31,8 +31,9 @@ def _get(path):
 
 
 def test_health():
-    code, body, _ = _get("/api/health")
+    code, body, h = _get("/api/health")
     assert (code, body) == (200, {"ok": True})
+    assert h["Access-Control-Allow-Origin"] == "*"
 
 
 def test_polling_no_dup_asc():
@@ -51,5 +52,22 @@ def test_since_invalid_400():
 
 
 def test_unknown_404():
-    code, _, _ = _get("/nope")
+    code, _, h = _get("/nope")
     assert code == 404
+    assert h["Access-Control-Allow-Origin"] == "*"
+
+
+def test_options_204_cors():
+    req = urllib.request.Request(BASE + "/api/health", method="OPTIONS",
+                                 headers={"Origin": "capacitor://localhost"})
+    with urllib.request.urlopen(req) as r:
+        assert r.status == 204
+        assert r.headers["Access-Control-Allow-Origin"] == "*"
+        assert "GET" in r.headers["Access-Control-Allow-Methods"]
+        assert r.headers["Content-Length"] == "0"
+
+
+def test_cors_on_400():
+    code, _, h = _get("/api/transactions?since=abc")
+    assert code == 400
+    assert h["Access-Control-Allow-Origin"] == "*"
