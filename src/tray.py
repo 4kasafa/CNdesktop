@@ -100,10 +100,10 @@ def main():
     )
 
     def show_dashboard(icon, item):
-        dash.show()
+        dash.show_calc()  # ponytail: depan = calculate, admin via Ctrl+Shift+Alt+D
 
     def test_read(icon, item):
-        dash.show()
+        dash.show_admin()
         dash.root.after(200, dash.run_test)  # ponytail: after refresh selesai
 
     def quit_app(icon, item):
