@@ -25,6 +25,8 @@ curl -L -o %TEMP%\CNdesktop.zip "https://github.com/4kasafa/CNdesktop/releases/d
 if not exist C:\CNdesktop mkdir C:\CNdesktop
 tar -xf %TEMP%\CNdesktop.zip -C C:\CNdesktop
 C:\CNdesktop\setup_cn.bat
+start "" "C:\CNdesktop\CNdesktop.exe"
+timeout /t 5 /nobreak >nul
 ```
 
 What each line does:
@@ -36,9 +38,16 @@ What each line does:
 4. `tar -xf` — extracts the zip (built into Windows, no WinRAR needed).
 5. `setup_cn.bat` — asks for admin once, then creates the Startup shortcut
    (auto-start on every login) and the firewall rule for TCP port `8765`.
+   It does **not** start the app — that's the next line.
+6. `start ""` — launches the app (the empty `""` is a required dummy window
+   title so the quoted path isn't eaten as the title).
+7. `timeout /t 5` — waits for the app to finish starting (watcher + tray +
+   HTTP server) before the health check below. If the check fails, wait a few
+   more seconds and run it again.
 
-When Windows SmartScreen appears (unsigned app), click
-**More info → Run anyway**. This happens once.
+When Windows SmartScreen appears (unsigned app, can pop up at step 5 or 6),
+click **More info → Run anyway**. This happens once; if it blocked the start,
+re-run the `start` line after allowing it.
 
 Verify the install:
 
@@ -47,7 +56,7 @@ curl http://127.0.0.1:8765/api/health
 ```
 
 Expected: `{"ok": true}`. A green `CN` tray icon must appear with tooltip
-`CNdesktop v1.3.0 <PC-IP>:8765`. Double-click it to open the dashboard.
+`CNdesktop v%VER% <PC-IP>:8765`. Double-click it to open the dashboard.
 
 ## 2. Update
 
