@@ -152,3 +152,11 @@ def test_clear_tanpa_backup():
     n, bak = clear_transactions(p, backup=False)
     assert (n, bak) == (1, None)
     assert list_since(p) == []
+
+
+def test_insert_created_at_eksplisit_verbatim():
+    p = init_db(_tmp())
+    insert_tx(p, "STAMP1", 9000, created_at="2026-10-03 17:11:00")
+    assert list_since(p)[0]["created_at"] == "2026-10-03 17:11:00"
+    insert_tx(p, "STAMP2", 9000)  # None -> default skema, bukan verbatim di atas
+    assert list_since(p)[1]["created_at"] != "2026-10-03 17:11:00"

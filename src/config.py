@@ -2,7 +2,7 @@
 import os
 
 APP_NAME = "CNdesktop"
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 PORT = 8765
 
 KETOKO_PROCESS_NAME = "KetokoD.exe"

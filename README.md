@@ -20,7 +20,7 @@ stores transactions in SQLite, and serves them to one phone over LAN WiFi
 Open `cmd` (no admin needed to start) and paste this whole block:
 
 ```bat
-set VER=1.3.0
+set VER=1.4.0
 curl -L -o %TEMP%\CNdesktop.zip "https://github.com/4kasafa/CNdesktop/releases/download/v%VER%/CNdesktop-v%VER%-portable.zip"
 if not exist C:\CNdesktop mkdir C:\CNdesktop
 tar -xf %TEMP%\CNdesktop.zip -C C:\CNdesktop
@@ -65,7 +65,7 @@ tray icon → **Keluar** — because a running EXE is file-locked. Never update
 in the middle of a transaction (no `Pembayaran` dialog open).
 
 ```bat
-set VER=1.3.0
+set VER=1.4.0
 tasklist | findstr /i CNdesktop.exe
 ```
 

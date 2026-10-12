@@ -9,11 +9,13 @@ from src.watcher import Watcher
 TUNAI = {"total_raw": "150.000,00", "tunai_raw": "200.000,00", "debit_raw": "0", "bank_raw": ""}
 
 
-def _watcher(snap=None, nos=None):
+def _watcher(snap=None, nos=None, kasir="", tanggal=""):
     t = [0.0]
     nos = nos if nos is not None else {}
     w = Watcher(db_path=os.path.join(tempfile.mkdtemp(), "w.db"),
                 read_dialog_fn=lambda h: dict(snap or TUNAI),
+                read_kasir_fn=lambda m: kasir,
+                read_tanggal_fn=lambda m: tanggal,
                 read_no_fn=lambda m: (nos.get(m, ["Auto"])[0]
                                       if len(nos.get(m, ["Auto"])) == 1
                                       else nos[m].pop(0)),
@@ -211,27 +213,30 @@ def test_no_transition_logged(caplog):
     assert "'Auto' -> '9001'" in caplog.text and "'9001' -> 'Auto'" in caplog.text
 
 
-def test_mismatch_review(caplog):
-    """Pola tak dikenal (ala Deposit/Kredit/E-Money): needs_review, tanpa save/crash."""
+def test_mismatch_defaults_tunai():
+    """Pola tak dikenal (ala Deposit/Kredit/E-Money): default Tunai, tetap tersimpan.
+
+    Total dari kasir; dialog gagal/parsial bukan alasan hangus (lag).
+    """
     w = _watcher(snap={"total_raw": "100.000,00", "tunai_raw": "0",
                        "debit_raw": "30.000,00", "bank_raw": "BCA"},
                  nos={"m1": ["9001"]})
     w.on_dialog_open(111, "m1")
-    with caplog.at_level(logging.WARNING, logger="cndesktop"):
-        w.on_dialog_close(111)
-        _run(w)
-    assert list_since(w.db) == [] and "needs_review" in caplog.text
+    w.on_dialog_close(111)
+    _run(w)
+    rows = list_since(w.db)
+    assert len(rows) == 1 and rows[0]["kategori"] == "Tunai" and rows[0]["total"] == 100000
 
 
-def test_incomplete_data_review(caplog):
-    """Total ada tapi komposisi tak lengkap (debit separuh tanpa bank) -> needs_review, tanpa save."""
+def test_incomplete_data_defaults_tunai():
+    """Total ada tapi komposisi tak lengkap (debit separuh tanpa bank) -> Tunai, tersimpan."""
     w = _watcher(snap={"total_raw": "150.000,00", "tunai_raw": "", "debit_raw": "50.000,00", "bank_raw": ""},
                  nos={"m1": ["9001"]})
     w.on_dialog_open(111, "m1")
-    with caplog.at_level(logging.WARNING, logger="cndesktop"):
-        w.on_dialog_close(111)
-        _run(w)
-    assert list_since(w.db) == [] and "needs_review" in caplog.text
+    w.on_dialog_close(111)
+    _run(w)
+    rows = list_since(w.db)
+    assert len(rows) == 1 and rows[0]["kategori"] == "Tunai" and rows[0]["total"] == 150000
 
 
 def test_blink_250ms_saves():
@@ -465,3 +470,100 @@ def test_warn_throttle(caplog):
         w._poll_pending(t[0])
         w._poll_pending(t[0])
     assert caplog.text.count("read_no lambat") == 1
+
+
+def test_kasir_primary_dialog_gagal_tetap_tunai():
+    """Lag: total dialog gagal total, total kasir ada -> Tunai 150000 tersimpan."""
+    w = _watcher(snap={"total_raw": "", "tunai_raw": "", "debit_raw": "", "bank_raw": ""},
+                 nos={"m1": ["Auto", "9001"]}, kasir="150.000,00")
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    assert w.pending is not None
+    _run(w)
+    rows = list_since(w.db)
+    assert len(rows) == 1 and rows[0]["total"] == 150000
+    assert rows[0]["kategori"] == "Tunai" and rows[0]["tunai"] == 150000
+
+
+def test_gagal_ganda_skip_tanpa_save():
+    """Kasir + dialog dua-dua gagal -> skip + tanpa pending, nomor pun tak disimpan."""
+    w = _watcher(snap={"total_raw": "", "tunai_raw": "", "debit_raw": "", "bank_raw": ""},
+                 nos={"m1": ["Auto", "9001"]}, kasir="")
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    assert w.pending is None
+    _run(w)
+    assert list_since(w.db) == []
+
+
+def test_tambah_item_sesi_baru_snapshot_baru():
+    """Tutup-untuk-tambah-item (tanpa nomor) dibuang; buka ulang = snapshot baru."""
+    w = _watcher(nos={"m1": ["Auto"] * 10 + ["9001"] * 60}, kasir="50.000,00")
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)  # tutup tambah-item: pending sesaat
+    assert w.pending is not None
+    w.read_kasir = lambda m: "70.000,00"  # kasir tambah item -> total baru
+    w.on_dialog_open(222, "m1")  # buka ulang: pending lama dibuang
+    assert w.pending is None
+    assert w.sessions[222]["snap"].get("kasir_raw") == "70.000,00"
+    _run(w, steps=5)
+    w.on_dialog_close(222)
+    _run(w)
+    rows = list_since(w.db)
+    assert len(rows) == 1 and rows[0]["total"] == 70000
+
+
+def test_split_kembalian_dinormalisasi():
+    """Split + tunai kembalian: tunai=total-debit, nontunai=debit."""
+    w = _watcher(snap={"total_raw": "", "tunai_raw": "50.000,00",
+                       "debit_raw": "30.000,00", "bank_raw": "BCA"},
+                 nos={"m1": ["9001"]}, kasir="50.000,00")
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)  # tick isi bank/debit/tunai dialog (tipe dari dialog)
+    w.on_dialog_close(111)
+    _run(w)
+    rows = list_since(w.db)
+    assert len(rows) == 1 and rows[0]["kategori"] == "Split"
+    assert rows[0]["total"] == 50000 and rows[0]["tunai"] == 20000
+    assert rows[0]["nontunai"] == 30000 and rows[0]["bank"] == "BCA"
+
+
+def test_stamp_dari_pos_saat_nomor_muncul():
+    """Transisi nomor + tanggal POS valid -> created_at verbatim tanggal POS."""
+    w = _watcher(nos={"m1": ["Auto", "9001"]}, kasir="150.000,00",
+                 tanggal="10/3/2026 5:11 PM")
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    _run(w)
+    rows = list_since(w.db)
+    assert len(rows) == 1 and rows[0]["created_at"] == "2026-03-10 17:11:00"
+
+
+def test_stamp_fallback_ditandai(caplog):
+    """Tanggal POS gagal -> tersimpan + log stamp=fallback."""
+    import re
+    w = _watcher(nos={"m1": ["Auto", "9001"]}, kasir="150.000,00", tanggal="")
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    with caplog.at_level(logging.INFO, logger="cndesktop"):
+        _run(w)
+    rows = list_since(w.db)
+    assert len(rows) == 1 and "stamp=fallback" in caplog.text
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", rows[0]["created_at"])
+
+
+def test_tanpa_transisi_tanpa_baca_tanggal():
+    """Tanpa transisi nomor -> reader tanggal 0 call (steady-state nol biaya)."""
+    calls = []
+    w = _watcher(nos={"m1": ["Auto"] * 50}, kasir="150.000,00")
+    w.read_tanggal = lambda m: calls.append(m) or ""
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=20)
+    w.on_dialog_close(111)
+    _run(w, steps=10)
+    assert calls == [] and list_since(w.db) == []

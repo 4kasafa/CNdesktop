@@ -72,14 +72,24 @@ def init_db(path: str | None = None) -> str:
 
 def insert_tx(path: str, no_transaksi: str, total: int, tunai: int = 0,
               nontunai: int = 0, bank: str = "", kategori: str = "Tunai",
-              no_urut: str = "") -> int | None:
-    """INSERT idempoten: duplikat no_transaksi → None (bukan error)."""
+              no_urut: str = "", created_at: str | None = None) -> int | None:
+    """INSERT idempoten: duplikat no_transaksi → None (bukan error).
+
+    created_at eksplisit (e.g. tanggal POS) disimpan verbatim;
+    None → default skema seperti sebelumnya. Skema tak diubah.
+    """
     try:
         with sqlite3.connect(path) as c:
-            cur = c.execute(
-                "INSERT INTO transactions(no_transaksi,no_urut,total,tunai,nontunai,bank,kategori)"
-                " VALUES(?,?,?,?,?,?,?)",
-                (no_transaksi, no_urut, total, tunai, nontunai, bank, kategori))
+            if created_at is None:
+                cur = c.execute(
+                    "INSERT INTO transactions(no_transaksi,no_urut,total,tunai,nontunai,bank,kategori)"
+                    " VALUES(?,?,?,?,?,?,?)",
+                    (no_transaksi, no_urut, total, tunai, nontunai, bank, kategori))
+            else:
+                cur = c.execute(
+                    "INSERT INTO transactions(no_transaksi,no_urut,total,tunai,nontunai,bank,kategori,created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?)",
+                    (no_transaksi, no_urut, total, tunai, nontunai, bank, kategori, created_at))
             return cur.lastrowid
     except sqlite3.IntegrityError:
         return None  # ponytail: duplikat/CHECK gagal = None, caller yang log needs_review

@@ -17,9 +17,14 @@ KETOKO_EDIT_CLASS = "l11illlII111I"
 
 # ponytail: cache handle UIA per-hwnd; scan subtree mahal sekali, baca ulang murah.
 # Dibuang saat dialog tutup / handle basi (Exists gagal) / main berganti.
-_EL_TOTAL, _EL_TUNAI, _EL_NO = {}, {}, {}
+_EL_TOTAL, _EL_TUNAI, _EL_NO, _EL_MAIN, _EL_DATE = {}, {}, {}, {}, {}
 # ponytail: sumber-pemenang per main-hwnd (value/name/legacy); fast path 1 call saja.
 _EL_SRC = {}
+
+# ponytail: pola tanggal POS (DateEdit main window, e.g. `10/3/2026 5:11 PM`);
+# pemindai, bukan validator — validasi kalender di parse.parse_tanggal_pos.
+import re as _re
+_TGL_RE = _re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
 
 
 def drop_dialog_cache(hwnd: int) -> None:
@@ -33,7 +38,11 @@ def drop_dialog_cache(hwnd: int) -> None:
 def drop_no_cache(main: int) -> None:
     """Buang cache nomor main window (Ketoko restart)."""
     _EL_NO.pop(main, None)
+    _EL_MAIN.pop(main, None)
+    _EL_DATE.pop(main, None)
     _EL_SRC.pop(main, None)
+    _EL_SRC.pop((main, "kasir"), None)
+    _EL_SRC.pop((main, "tanggal"), None)
 
 
 def get_window_process_name(hwnd: int) -> str:
@@ -394,24 +403,65 @@ def read_no_transaksi(hwnd_main: int) -> str:
     return ""
 
 
-def read_ketoko_value(hwnd: int) -> str:
-    """Baca nilai nominal dari window Ketoko via UIAutomation (total berjalan kasir).
+def read_tanggal_pos(hwnd_main: int) -> str:
+    """Tanggal-jam POS (main window, e.g. DateEdit `10/3/2026 5:11 PM`).
 
-    Return string digit bersih atau '' jika gagal/kosong. Tidak pernah raise.
+    Pola cache sama dengan nomor; locator = scan nilai berpola tanggal
+    (aid pasti belum dikenal — optimasi saat dump UIA masuk). '' jika
+    gagal, tidak pernah raise. Dipanggil sekali per save, bukan per poll.
+    """
+    if not hwnd_main:
+        return ""
+    try:
+        with auto.UIAutomationInitializerInThread():
+            v, st = _fast_read(_EL_DATE, _EL_SRC, hwnd_main, (hwnd_main, "tanggal"))
+            if v or st == "empty":
+                return v  # hit / hidup-tapi-kosong: tanpa scan
+            m = auto.ControlFromHandle(hwnd_main)  # miss -> rescan penuh sekali
+            if not m or not m.Exists(1, 0.5):
+                return ""
+            for e in _iter_edits(m):
+                s = _read_edit_sources(e)
+                for src in ("value", "name", "legacy"):
+                    raw = s.get(src, "")
+                    if raw and _TGL_RE.search(raw):
+                        _EL_DATE[hwnd_main] = e
+                        _EL_SRC[(hwnd_main, "tanggal")] = src
+                        return raw
+    except Exception:
+        pass
+    return ""
+
+
+def read_ketoko_value(hwnd: int) -> str:
+    """Baca total besar kasir (main window) via UIA.
+
+    Cache `_EL_MAIN` agar retry tiap tick murah (pola `_fast_read` dialog).
+    Return string mentah atau '' jika gagal/kosong. Tidak pernah raise.
     """
     if not hwnd:
         return ""
     try:
         with auto.UIAutomationInitializerInThread():
+            v, st = _fast_read(_EL_MAIN, _EL_SRC, hwnd, (hwnd, "kasir"))
+            if v or st == "empty":
+                return v  # hit / hidup-tapi-kosong: tanpa scan
             window = auto.ControlFromHandle(hwnd)
             if not window or not window.Exists(1, 0.5):
                 return ""
             edit = window.EditControl(searchDepth=10, ClassName=KETOKO_EDIT_CLASS)
             if edit.Exists(1, 0.5):
+                _EL_MAIN[hwnd] = edit
+                s = _read_edit_sources(edit)
                 for key in ("value", "name", "legacy"):
-                    v = _read_edit_sources(edit).get(key, "")
-                    if v and v.strip("0.,"):
-                        return v
+                    w = s.get(key, "")
+                    if w:
+                        _EL_SRC[(hwnd, "kasir")] = key
+                        break
+                for key in ("value", "name", "legacy"):
+                    val = s.get(key, "")
+                    if val and val.strip("0.,"):
+                        return val
                 # ponytail: field nominal ketemu tapi kosong/0 -> percaya, jangan fallback
                 return ""
             for ctrl in _iter_edits(window):

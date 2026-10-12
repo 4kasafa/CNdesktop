@@ -52,23 +52,24 @@ Parsing nominal: `Rp 150.000,00 → 150000` (strip `,\d{1,2}$`, ambil digit, tol
 
 ## 4. Alur sistem
 
-1. Dialog `Pembayaran` muncul → snapshot Total final (bukan total berjalan kasir; total kasir `ClassName=l11illlII111I` di main hanya untuk konteks).
+1. Dialog `Pembayaran` muncul → snapshot Total dari total besar kasir main window (sumber utama; retry tiap tick sampai tutup). Total dialog kuning hanya darurat bila kasir gagal; dua-dua gagal → skip+log.
 2. Baca `ComboBank.Value`: kosong dan field Debit `0`/kosong → kandidat Tunai. Ada isi → baca nominal Debit.
-3. `debit == total` → Nontunai. `debit < total` → baca `tBayarTunai`; jika `debit + tunai == total` → Split.
+3. `debit == total` → Nontunai. `debit < total` → baca `tBayarTunai`; jika `debit>0, debit<total, tunai>=total-debit` → Split (`tunai=total-debit`). Tanpa debit/ambigu/kembalian → Tunai (`tunai=total`).
 4. Tunai murni: simpan Total saja, abaikan input tunai (kembalian tidak disimpan).
-5. Dialog tutup + total>0 → slot pending (snapshot + window utama). Total kosong (= Batal) → discard diam-diam.
-6. Poll global No Transaksi tiap 500ms; transisi ke angka + ada pending → klasifikasi + `INSERT` sekali pakai. Nomor tak muncul = tak ada save (Batal). Data tak lengkap → log `needs_review`, tanpa save separuh.
-7. HP polling periodik dan mengambil transaksi baru (repo HP terpisah).
+5. Dialog tutup + total>0 → slot pending (snapshot + window utama). Total kosong dua sumber (= Batal) → discard diam-diam. Tutup-untuk-tambah-item → buka ulang = sesi + snapshot baru.
+6. Poll global No Transaksi tiap 500ms; transisi ke angka + ada pending → klasifikasi + `INSERT` sekali pakai. Nomor tak muncul = tak ada save (Batal). Total dua sumber gagal → log gagal-baca, tanpa save.
+7. `created_at` = tanggal POS dibaca sekali saat transisi nomor (`stamp=pos`); tanggal gagal → jam komputer + `stamp=fallback`.
+8. HP polling periodik dan mengambil transaksi baru (repo HP terpisah).
 
 Pseudocode klasifikasi:
 
 ```
-total = parse(total_raw)
+total = parse(kasir_raw) or parse(total_raw)  # darurat dialog
 debit = parse(debit_raw) if bank else 0
-if not bank and debit == 0: kategori = "Tunai"
-elif debit == total: kategori = "Nontunai"
-elif debit + parse(tunai_raw) == total: kategori = "Split"
-else: needs_review (jangan save)
+if debit == total: kategori = "Nontunai"
+elif not bank and debit == 0: kategori = "Tunai"
+elif 0 < debit < total and parse(tunai_raw) >= total - debit: kategori = "Split"
+else: Tunai (default; needs_review hanya bila total dua sumber None)
 ```
 
 ## 5. SQLite

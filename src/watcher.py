@@ -11,11 +11,12 @@ import logging
 import threading
 import time
 from ctypes import wintypes
+from datetime import datetime as _dt
 
 from src.classify import classify
 from src.config import BURST_EVERY, ENUM_EVERY, FAST_GRACE, FULL_EVERY, NO_EVERY, READ_EVERY
 from src.db import init_db, insert_tx
-from src.parse import parse_no_transaksi, parse_nominal
+from src.parse import parse_no_transaksi, parse_nominal, parse_tanggal_pos
 from src.pos_reader import (
     KETOKO_PROCESS_NAME,
     KETOKO_WINDOW_TITLE,
@@ -25,7 +26,9 @@ from src.pos_reader import (
     lifetime_init,
     read_dialog,
     read_dialog_fast,
+    read_ketoko_value,
     read_no_transaksi,
+    read_tanggal_pos,
 )
 
 log = logging.getLogger("cndesktop")
@@ -82,12 +85,15 @@ class Watcher:
     """State machine per-hwnd + glue Win32. Reader/enum/clock injectable untuk test."""
 
     def __init__(self, db_path=None, read_dialog_fn=None, read_no_fn=None,
-                  enum_fn=None, clock=None, read_dialog_fast_fn=None):
+                   enum_fn=None, clock=None, read_dialog_fast_fn=None,
+                   read_kasir_fn=None, read_tanggal_fn=None):
         self.db = init_db(db_path)
         self.read_dialog = read_dialog_fn or read_dialog
         # ponytail: test inject read_dialog_fn saja -> fast pakai fake yang sama
         # (hindari UIA asli ke hwnd fake); prod: fast = read_dialog_fast asli.
         self.read_dialog_fast = read_dialog_fast_fn or read_dialog_fn or read_dialog_fast
+        self.read_kasir = read_kasir_fn or read_ketoko_value
+        self.read_tanggal = read_tanggal_fn or read_tanggal_pos
         self.read_no = read_no_fn or read_no_transaksi
         self.enum = enum_fn or _enum_ketoko
         self.clock = clock or time.monotonic
@@ -113,6 +119,17 @@ class Watcher:
                 self.sessions[hwnd] = {"main": main_hwnd, "snap": {}, "last_read": 0.0,
                                        "seen": False, "last_full": now, "born": now,
                                        "full_done": False}
+            # ponytail: snapshot total kasir sekali saat buka (sumber utama);
+            # gagal -> retry tiap tick sampai tutup, bukan fatal di sini.
+            try:
+                kraw = self.read_kasir(main_hwnd) if main_hwnd else ""
+            except Exception:
+                kraw = ""
+            if kraw:
+                with self._lock:
+                    cur = self.sessions.get(hwnd)
+                    if cur is not None:
+                        cur["snap"]["kasir_raw"] = kraw
             return True
         return False
 
@@ -132,14 +149,24 @@ class Watcher:
             snap = dict(s["snap"])
             main = s["main"]
             seen = s.get("seen", False)
-        total = parse_nominal(snap.get("total_raw") or "")
+        # ponytail: hierarki total kasir -> darurat dialog (tutup = retry terakhir
+        # kasir masih hidup; dialog sekarat hanya 1x fast, bukan full scan).
+        total = parse_nominal(snap.get("kasir_raw") or "") \
+            or parse_nominal(snap.get("total_raw") or "")
         if not total:
+            try:
+                k = self.read_kasir(main) if main else ""
+                if k:
+                    snap["kasir_raw"] = k
+            except Exception:
+                pass
             try:
                 if _merge_snap(snap, self.read_dialog_fast(hwnd)):
                     seen = True
             except Exception:
                 pass
-            total = parse_nominal(snap.get("total_raw") or "")
+            total = parse_nominal(snap.get("kasir_raw") or "") \
+                or parse_nominal(snap.get("total_raw") or "")
         if not total:
             ada = ",".join(k[:-4] for k, v in snap.items() if v) or "-"
             if seen:
@@ -149,25 +176,41 @@ class Watcher:
             return
         with self._lock:
             self.pending = {"snap": snap, "main": main, "t": self.clock()}
-        log.info("tutup hwnd=%s -> pending (total=%s)", hwnd, total)
+        src = "kasir" if parse_nominal(snap.get("kasir_raw") or "") else "dialog"
+        log.info("tutup hwnd=%s -> pending (total=%s sumber=%s)", hwnd, total, src)
 
     # ---- kerja periodik ----
-    def _save(self, hwnd, s, doc_id, counter):
-        """Klasifikasi + INSERT dari snap pending + nomor transisi."""
-        total = parse_nominal((s["snap"].get("total_raw") or ""))
-        tunai = parse_nominal((s["snap"].get("tunai_raw") or ""))
-        debit = parse_nominal((s["snap"].get("debit_raw") or ""))
-        bank = (s["snap"].get("bank_raw") or "").strip()
+    def _save(self, hwnd, s, doc_id, counter, stamp=None, origin="pos"):
+        """Klasifikasi + INSERT dari snap pending + nomor transisi.
+
+        Total = kasir beku, fallback dialog darurat; dialog hanya tipe
+        (tunai/debit/bank). Ambigu -> Tunai; needs_review hanya tanpa total.
+        stamp = created_at eksplisit (tanggal POS) atau jam-komputer-fallback.
+        """
+        snap = s["snap"]
+        total = parse_nominal(snap.get("kasir_raw") or "") \
+            or parse_nominal((snap.get("total_raw") or ""))
+        tunai = parse_nominal((snap.get("tunai_raw") or ""))
+        debit = parse_nominal((snap.get("debit_raw") or ""))
+        bank = (snap.get("bank_raw") or "").strip()
         kat = classify(total, tunai, debit, bank)
         if kat == "needs_review" or not total:
             log.warning("needs_review: data tak lengkap hwnd=%s kat=%s", hwnd, kat)
         else:
-            t, n = (total, 0) if kat == "Tunai" else (0, total) if kat == "Nontunai" else (tunai, debit)
-            rowid = insert_tx(self.db, doc_id, total, t, n, bank, kat, no_urut=counter)
+            if kat == "Tunai":
+                t, n = total, 0
+            elif kat == "Nontunai":
+                t, n = 0, total
+            else:  # Split longgar: tunai dinormalisasi = total-debit (kembalian aman)
+                t, n = total - (debit or 0), debit or 0
+            rowid = insert_tx(self.db, doc_id, total, t, n, bank, kat, no_urut=counter,
+                              created_at=stamp)
             if rowid is None:
                 log.info("duplikat no=%s (abaikan)", doc_id)
             else:
-                log.info("saved id=%s no=%s urut=%s kat=%s", rowid, doc_id, counter, kat)
+                src = "kasir" if parse_nominal(snap.get("kasir_raw") or "") else "dialog"
+                log.info("saved id=%s no=%s urut=%s kat=%s sumber=%s stamp=%s",
+                         rowid, doc_id, counter, kat, src, origin)
         with self._lock:
             self.sessions.pop(hwnd, None)
 
@@ -190,6 +233,11 @@ class Watcher:
                 if cur is None or now - cur.get("last_read", 0.0) < READ_EVERY:
                     continue
                 cur["last_read"] = now
+                main = cur.get("main", 0)
+                try:
+                    kasir_need = not parse_nominal(cur["snap"].get("kasir_raw") or "")
+                except Exception:
+                    kasir_need = True
                 try:  # ponytail: Tunai lengkap -> full scan 3 dtk tak ada guna
                     tot = parse_nominal(cur["snap"].get("total_raw") or "")
                     tun = parse_nominal(cur["snap"].get("tunai_raw") or "")
@@ -212,6 +260,14 @@ class Watcher:
             except Exception as e:
                 log.debug("read gagal hwnd=%s: %r", hwnd, e)
                 continue
+            # ponytail: retry kasir tiap tick sampai tutup (sumber utama total);
+            # main hidup + cache murah, dialog sekarat tak dipakai untuk total.
+            kraw = ""
+            if kasir_need and main:
+                try:
+                    kraw = self.read_kasir(main)
+                except Exception as e:
+                    log.debug("read kasir gagal hwnd=%s: %r", hwnd, e)
             dt = self.clock() - t0
             if dt > 1.0:
                 if now - self._last_warn_dlg >= 60.0:
@@ -224,7 +280,11 @@ class Watcher:
             try:
                 with self._lock:
                     cur = self.sessions.get(hwnd)
-                    if cur is not None and _merge_snap(cur["snap"], fresh):
+                    if cur is None:
+                        continue
+                    if kraw:
+                        cur["snap"]["kasir_raw"] = kraw
+                    if _merge_snap(cur["snap"], fresh):
                         cur["seen"] = True
             except Exception as e:
                 log.debug("merge gagal hwnd=%s: %r", hwnd, e)
@@ -269,6 +329,7 @@ class Watcher:
                 # agar close susulan tak bikin pending duplikat.
                 hwnd_best = max(self.sessions, key=lambda h: self.sessions[h].get("last_read", 0.0))
                 snap = dict(self.sessions[hwnd_best]["snap"])
+                snap_main = self.sessions[hwnd_best].get("main", 0)
                 self.pending = None
                 self.sessions.pop(hwnd_best, None)
                 try:
@@ -279,18 +340,41 @@ class Watcher:
                 age = 0.0
             elif self.pending:
                 snap = self.pending["snap"]
+                snap_main = self.pending.get("main", 0)
                 age = now - self.pending["t"]
                 self.pending = None  # konsumsi sekali pakai (sukses/gagal sama)
                 src = "pending"
             else:
                 return  # hanya catat (Batal -> tak ada transisi -> tak ada save)
+        # ponytail: nomor datang sebelum tick sempat isi kasir (lag) ->
+        # kesempatan terakhir 1x baca kasir (main hidup, cache murah).
+        try:
+            if not (parse_nominal(snap.get("kasir_raw") or "")
+                    or parse_nominal(snap.get("total_raw") or "")) and snap_main:
+                k = self.read_kasir(snap_main)
+                if k:
+                    snap["kasir_raw"] = k
+        except Exception:
+            pass
         if src == "sesi-aktif":
             log.info("simpan via transisi-nomor no=%s (sesi-aktif) baca_no=%.2fs", doc_id, dt_no)
         else:
             log.info("simpan via transisi-nomor no=%s umur_pending=%.1fs baca_no=%.2fs",
                      doc_id, age, dt_no)
+        # ponytail: stamp POS dibaca sekali per save (bukan per poll) dari main
+        # yang sama dengan sumber nomor; gagal -> jam komputer apa adanya +
+        # flag fallback, tanpa asumsi zona.
         try:
-            self._save("pending", {"snap": snap}, doc_id, counter)
+            traw = self.read_tanggal(snap_main) if snap_main else ""
+        except Exception:
+            traw = ""
+        stamp = parse_tanggal_pos(traw)
+        origin = "pos"
+        if stamp is None:
+            stamp = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+            origin = "fallback"
+        try:
+            self._save("pending", {"snap": snap}, doc_id, counter, stamp, origin)
         except Exception as e:
             log.debug("save pending gagal: %r", e)
 
