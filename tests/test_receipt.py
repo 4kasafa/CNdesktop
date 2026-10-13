@@ -19,7 +19,8 @@ def _job(**kw):
 def test_valid_mock_sender():
     kirim = []
     out = process_print_job(_job(), sender=lambda p: kirim.append(p) or "MockPrinter")
-    assert out == {"printer": "MockPrinter", "total": 205000}
+    assert out == {"printer": "MockPrinter", "total": 205000, "nontunai": 0,
+                   "sales_total": 215000}
     assert len(kirim) == 1
     payload = kirim[0]
     assert payload[:2] == b"\x1b@"
@@ -73,3 +74,38 @@ def test_sender_gagal_menggelembung():
 
     with pytest.raises(RuntimeError, match="macet"):
         process_print_job(_job(), sender=rusak)
+
+
+def test_nontunai_masuk_total_penjualan():
+    kirim = []
+    out = process_print_job(
+        _job(qty={"100000": 1}, expense_amount=5000, nontunai_amount=50000),
+        sender=lambda p: kirim.append(p) or "P")
+    assert out == {"printer": "P", "total": 100000, "nontunai": 50000,
+                   "sales_total": 155000}
+    assert "Rp 155.000".encode() in kirim[0]  # Total = fisik+nontunai+expense
+    assert "Rp 50.000".encode() in kirim[0]  # baris Non Tunai
+
+
+def test_nontunai_saja_tanpa_fisik_lolos():
+    out = process_print_job(_job(qty={}, nontunai_amount=50000),
+                            sender=lambda p: "P")
+    assert out["total"] == 0 and out["nontunai"] == 50000
+
+
+def test_nontunai_negatif_ditolak():
+    with pytest.raises(ValueError, match="negatif"):
+        process_print_job(_job(nontunai_amount=-100), sender=lambda p: "P")
+
+
+def test_nontunai_invalid_jadi_nol():
+    out = process_print_job(_job(qty={"100000": 1}, nontunai_amount="xx"),
+                            sender=lambda p: "P")
+    assert out["nontunai"] == 0
+
+
+def test_tanpa_field_nontunai_backward_compat():
+    d = _job()
+    d.pop("nontunai_amount", None)
+    out = process_print_job(d, sender=lambda p: "P")
+    assert out["nontunai"] == 0 and out["total"] == 205000

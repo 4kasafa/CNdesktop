@@ -83,8 +83,9 @@ def add_receipt_margin(lines, width, margin=2):
 
 
 def build_receipt_text(*, kasir, branch="-", shift="-", user_id="-",
-                       qty, expense_amount=0, expense_note="", width, now=None):
-    """Struk ala cash_note; Non Tunai Rp 0 (tanpa sistem)."""
+                       qty, expense_amount=0, expense_note="", nontunai_amount=0,
+                       width, now=None):
+    """Struk ala cash_note; Non Tunai dari nontunai_amount (default 0)."""
     now = now or datetime.now()
     margin = 2
     inner_width = max(width - (margin * 2), 10)
@@ -107,7 +108,10 @@ def build_receipt_text(*, kasir, branch="-", shift="-", user_id="-",
             else:
                 physical_lines.append(f"{left}{' ' * space}{right}")
 
-    non_cash_total = 0  # ponytail: tanpa Total Sistem, ditulis Rp 0
+    try:
+        non_cash_total = int(nontunai_amount or 0)
+    except (ValueError, TypeError):
+        non_cash_total = 0
     sales_total = physical_total + non_cash_total + expense_amount
 
     lines = []
@@ -226,11 +230,24 @@ def _norm_qty(raw) -> dict:
     return out
 
 
+def _norm_nontunai(raw) -> int:
+    """Normalisasi nontunai_amount: str angka→int, kosong/invalid→0, negatif→raise."""
+    try:
+        v = int(raw or 0)
+    except (ValueError, TypeError):
+        return 0
+    if v < 0:
+        raise ValueError("nontunai_amount tidak boleh negatif.")
+    return v
+
+
 def process_print_job(data: dict | None, sender=None) -> dict:
     """Simulasi halaman calculate secara headless + cetak.
 
-    data: {kasir, branch, shift, user_id, qty, expense_amount, expense_note, size}.
-    Return {"printer", "total"}. Raise ValueError (validasi) / RuntimeError (printer).
+    data: {kasir, branch, shift, user_id, qty, expense_amount, expense_note,
+        nontunai_amount, size}.
+    Return {"printer", "total" (fisik), "nontunai", "sales_total"}.
+    Raise ValueError (validasi) / RuntimeError (printer).
     """
     data = data if isinstance(data, dict) else {}
     kasir = (data.get("kasir") or "").strip()
@@ -239,19 +256,21 @@ def process_print_job(data: dict | None, sender=None) -> dict:
         expense = int(data.get("expense_amount") or 0)
     except (ValueError, TypeError):
         expense = 0
+    nontunai = _norm_nontunai(data.get("nontunai_amount"))
     note = data.get("expense_note") or ""
     size = str(data.get("size") or "58")
     if size not in ("58", "80"):
         raise ValueError("size harus 58 atau 80.")
     total = hitung_total(qty)
-    err = validate_calc(kasir, total)
+    err = validate_calc(kasir, total + nontunai)
     if err:
         raise ValueError(err)
     text = build_receipt_text(
         kasir=kasir, branch=data.get("branch") or "-",
         shift=data.get("shift") or "-", user_id=data.get("user_id") or "-",
         qty=qty, expense_amount=expense, expense_note=note,
-        width=print_width(size))
+        nontunai_amount=nontunai, width=print_width(size))
     payload = build_escpos_receipt(text)
     printer = (sender or send_to_printer)(payload)
-    return {"printer": printer, "total": total}
+    return {"printer": printer, "total": total, "nontunai": nontunai,
+            "sales_total": total + nontunai + expense}

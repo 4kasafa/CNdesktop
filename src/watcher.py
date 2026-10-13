@@ -108,10 +108,45 @@ class Watcher:
         self._main = 0
         self._last_enum = 0.0
         self._run = False
+        from src.db import get_watcher_enabled
+        try:
+            self._paused = not get_watcher_enabled(self.db)
+        except Exception:
+            self._paused = False  # ponytail: DB rusak = default aktif
+
+    # ---- kontrol aktif/nonaktif (tanpa unhook) ----
+    def is_enabled(self) -> bool:
+        return not self._paused
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Persist + terapkan. Activate = fresh (buang sesi/pending terlewat);
+        deactivate = biarkan sesi/pending didrain tick berikutnya."""
+        from src.db import set_watcher_enabled
+        enabled = bool(enabled)
+        with self._lock:
+            if enabled:
+                # ponytail: fresh, yang terlewat selama mati diabaikan
+                self.sessions.clear()
+                self.pending = None
+            self._paused = not enabled
+        try:
+            set_watcher_enabled(self.db, enabled)
+        except Exception as e:
+            log.debug("persist watcher_enabled gagal: %r", e)
+
+    def db_busy(self) -> bool:
+        """True jika ada sesi aktif atau pending (tulis DB mungkin jalan)."""
+        try:
+            with self._lock:
+                return bool(self.sessions) or self.pending is not None
+        except Exception:
+            return False
 
     # ---- event murni (dipakai hook maupun test) ----
     def on_dialog_open(self, hwnd, main_hwnd):
         """Return True jika sesi baru dibuat."""
+        if self._paused:
+            return False  # ponytail: mati = sesi baru diabaikan di semua jalur
         if hwnd not in self.sessions:
             with self._lock:
                 self.pending = None  # sesi baru -> pending lama tak bernomor pasti basi, buang
@@ -382,6 +417,12 @@ class Watcher:
         """Satu iterasi worker (100ms real). Tidak pernah raise. Dipakai test single-thread."""
         try:
             now = self.clock()
+            if self._paused:
+                # ponytail: paused = drain sisa (sesi/pending lama) tapi
+                # tanpa reconcile enum agar dialog baru diabaikan
+                self._tick_sessions(now)
+                self._poll_pending(now)
+                return
             self._tick_sessions(now)
             self._poll_pending(now)
             if now - self._last_enum >= ENUM_EVERY:
@@ -407,6 +448,8 @@ class Watcher:
         for hwnd, title in wins:
             if title == "Pembayaran":
                 seen.add(hwnd)
+                if self._paused:
+                    continue  # ponytail: mati = enum tak buka sesi baru
                 if self.on_dialog_open(hwnd, main):
                     log.info("dialog terbuka (fallback enum) hwnd=%s", hwnd)
         with self._lock:
@@ -427,6 +470,8 @@ class Watcher:
         try:
             if event in (EV_DESTROY, EV_HIDE) and _obj != 0:
                 return  # abaikan caret/dropdown/tooltip WPF, hanya OBJID_WINDOW
+            if self._paused and hwnd not in self.sessions:
+                return  # ponytail: mati = dialog baru diabaikan, sisa didrain tick
             proc_ok = get_window_process_name(hwnd).lower() == KETOKO_PROCESS_NAME.lower()
             if not proc_ok:
                 return

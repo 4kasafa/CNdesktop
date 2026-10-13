@@ -2,7 +2,7 @@
 
 Pola meniru cash_note tabs/calculate_tab.py: satu window berisi view yang
 ditukar (input <-> preview), admin dibuka via Ctrl+Shift+Alt+D.
-Tanpa Total Sistem (Non Tunai ditulis Rp 0); kasir dropdown dari tabel
+Total Penjualan = Fisik+Nontunai+Pengeluaran; kasir dropdown dari tabel
 SQLite cashiers + tombol Kasir membuka modal kelola (tambah/edit/hapus);
 preview + Cetak TANPA simpan, sesudah cetak nilai tetap diam di preview.
 """
@@ -126,15 +126,40 @@ def last_20(db_path: str) -> list[dict]:
         return []
 
 
+def check_watcher_pin(db_path: str, pin: str) -> bool:
+    """True jika PIN cocok dengan PIN tersimpan (default 363636). Murni, tanpa GUI."""
+    from src.db import get_wipe_pin
+    try:
+        return (pin or "").strip() == get_wipe_pin(db_path)
+    except Exception:
+        return (pin or "").strip() == "363636"
+
+
+def validate_new_pin(pin: str) -> str | None:
+    """Return pesan error, atau None jika PIN 6-digit valid. Murni."""
+    pin = (pin or "").strip()
+    if not (pin.isdigit() and len(pin) == 6):
+        return "PIN harus 6 digit angka."
+    return None
+
+
+def watcher_status_text(enabled: bool, alive: bool) -> str:
+    """Teks lbl_watcher: mati jika paused, walau thread hidup. Murni."""
+    if not enabled:
+        return "watcher: mati"
+    return f"watcher: {'jalan' if alive else 'mati'}"
+
+
 class Dashboard:
     def __init__(self, db_path, port, on_port_change=None,
-                 watcher_alive=None, test_read=None):
+                 watcher_alive=None, test_read=None, watcher=None):
         from src.config import VERSION
         self.db_path = db_path
         self.port = port
         self.on_port_change = on_port_change  # fn(new_port) -> None
         self.watcher_alive = watcher_alive or (lambda: True)
         self.test_read = test_read or default_test_read
+        self._watcher = watcher  # ponytail: toggle persist via watcher.set_enabled
 
         self.root = ctk.CTk()
         self.root.title(f"CNdesktop v{VERSION} :{port}")
@@ -148,6 +173,7 @@ class Dashboard:
         self.subtotal_labels = {}
         self.expense_amount = 0
         self.expense_note = ""
+        self.nontunai_amount = 0
         self.vcmd = (self.root.register(self.validate_numeric), "%P")
         self.print_size_var = ctk.StringVar(value="58")
         self.cashier_var = ctk.StringVar(value=KASIR_PLACEHOLDER)
@@ -296,6 +322,20 @@ class Dashboard:
                                             text_color="black")
         self.lbl_grand_total.pack(side="right", padx=15, pady=10)
 
+        nontunai_frame = ctk.CTkFrame(footer, fg_color=SIDEBAR_COLOR, border_width=1,
+                                      border_color=BORDER_COLOR, corner_radius=8)
+        nontunai_frame.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(nontunai_frame, text="Nontunai:",
+                     font=("Segoe UI", 12, "bold"), text_color=TEXT_COLOR).pack(
+                         side="left", padx=15, pady=8)
+        self.nontunai_entry = ctk.CTkEntry(nontunai_frame, placeholder_text="0",
+                                           width=120, justify="center",
+                                           fg_color=CONSOLE_COLOR,
+                                           border_color=BORDER_COLOR,
+                                           validate="key", validatecommand=self.vcmd)
+        self.nontunai_entry.pack(side="right", padx=15, pady=8)
+        self.nontunai_entry.bind("<KeyRelease>", self.update_nontunai)
+
         btn_box = ctk.CTkFrame(footer, fg_color="transparent")
         btn_box.pack(fill="x")
         ctk.CTkButton(btn_box, text="Pratinjau", fg_color=ACCENT_COLOR,
@@ -387,6 +427,15 @@ class Dashboard:
         ctk.CTkButton(row2, text="Hapus Transaksi", fg_color="#d32f2f",
                       hover_color="#b71c1c", text_color="white",
                       command=self.confirm_clear_transactions).pack(side="left")
+        ctk.CTkButton(row2, text="Watcher On/Off",
+                      command=self.toggle_watcher).pack(side="left", padx=8)
+        row3 = ctk.CTkFrame(bot, fg_color="transparent")
+        row3.pack(fill="x", padx=8, pady=(0, 8))
+        ctk.CTkLabel(row3, text="PIN baru:").pack(side="left")
+        self.ent_pin = ctk.CTkEntry(row3, width=100, show="*")
+        self.ent_pin.pack(side="left", padx=4)
+        ctk.CTkButton(row3, text="Simpan PIN", width=90,
+                      command=self.change_pin).pack(side="left")
         self.txt_test = ctk.CTkTextbox(bot, height=90)
         self.txt_test.pack(fill="x", padx=8, pady=(0, 8))
 
@@ -415,6 +464,25 @@ class Dashboard:
             qty = 0
         self.subtotal_labels[denom].configure(text=format_rp(qty * denom))
         self.lbl_grand_total.configure(text=format_rp(hitung_total(self._qty_map())))
+
+    def _nontunai_amount(self) -> int:
+        try:
+            return int((self.nontunai_entry.get() or 0))
+        except (ValueError, TypeError, AttributeError):
+            try:
+                return int(self.nontunai_amount or 0)
+            except (ValueError, TypeError):
+                return 0
+
+    def update_nontunai(self, event=None):
+        try:
+            self.nontunai_amount = int(self.nontunai_entry.get() or 0)
+        except (ValueError, TypeError):
+            self.nontunai_amount = 0
+        try:
+            self.update_receipt_preview()
+        except Exception:
+            pass
 
     # --- kasir (dropdown SQLite + modal kelola) ---
 
@@ -461,7 +529,8 @@ class Dashboard:
                 ac.get("shift") or "-", ac.get("kasir_id") or "-")
 
     def show_preview(self):
-        err = validate_calc(self.kasir_name(), hitung_total(self._qty_map()))
+        err = validate_calc(self.kasir_name(),
+                            hitung_total(self._qty_map()) + self._nontunai_amount())
         if err:
             messagebox.showwarning("Data Tidak Lengkap", err)
             return
@@ -661,6 +730,7 @@ class Dashboard:
             kasir=kasir, branch=branch, shift=shift, user_id=user_id,
             qty=self._qty_map(),
             expense_amount=self.expense_amount, expense_note=self.expense_note,
+            nontunai_amount=self._nontunai_amount(),
             width=self.get_receipt_char_width(for_print=False)))
 
     def cetak(self):
@@ -677,6 +747,7 @@ class Dashboard:
                         kasir=kasir, branch=branch, shift=shift, user_id=user_id,
                         qty=self._qty_map(), expense_amount=self.expense_amount,
                         expense_note=self.expense_note,
+                        nontunai_amount=self._nontunai_amount(),
                         width=self.get_receipt_char_width(for_print=True)))
                 os.startfile(path, "print")
             except Exception as e:
@@ -689,6 +760,7 @@ class Dashboard:
                 "shift": ac.get("shift") or "-", "user_id": ac.get("kasir_id") or "-",
                 "qty": self._qty_map(), "expense_amount": self.expense_amount,
                 "expense_note": self.expense_note,
+                "nontunai_amount": self._nontunai_amount(),
                 "size": self.print_size_var.get()})
         except (ValueError, RuntimeError) as e:
             messagebox.showerror("Error Cetak", str(e))
@@ -706,6 +778,11 @@ class Dashboard:
             self.inputs[denom].delete(0, "end")
             self.subtotal_labels[denom].configure(text="Rp 0")
         self.lbl_grand_total.configure(text="Rp 0")
+        self.nontunai_amount = 0
+        try:
+            self.nontunai_entry.delete(0, "end")
+        except Exception:
+            pass
 
     # --- expense (meniru render_expense_section cash_note) ---
 
@@ -936,12 +1013,103 @@ class Dashboard:
                       command=on_cancel).pack(side="left", expand=True,
                                               padx=(4, 0))
 
+    def watcher_enabled_state(self) -> bool:
+        try:
+            if self._watcher is not None:
+                return bool(self._watcher.is_enabled())
+            from src.db import get_watcher_enabled
+            return bool(get_watcher_enabled(self.db_path))
+        except Exception:
+            return True
+
+    def _prompt_pin(self, title="PIN") -> str | None:
+        """Popup input PIN, return PIN atau None jika batal. Tiap toggle wajib lewat sini."""
+        out = {"pin": None}
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title(title)
+        dialog.geometry("300x170")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        box = ctk.CTkFrame(dialog, fg_color="transparent")
+        box.pack(fill="both", expand=True, padx=20, pady=15)
+        ctk.CTkLabel(box, text="Masukkan PIN 6-digit:",
+                     font=("Segoe UI", 11, "bold"),
+                     text_color=TEXT_COLOR).pack(anchor="w")
+        entry = ctk.CTkEntry(box, show="*", fg_color=CONSOLE_COLOR,
+                             border_color=BORDER_COLOR, corner_radius=5)
+        entry.pack(fill="x", pady=(4, 12))
+        entry.focus()
+
+        def on_ok(event=None):
+            out["pin"] = entry.get().strip()
+            dialog.destroy()
+
+        def on_cancel(event=None):
+            dialog.destroy()
+
+        entry.bind("<Return>", on_ok)
+        dialog.bind("<Escape>", on_cancel)
+        row = ctk.CTkFrame(box, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkButton(row, text="OK", corner_radius=5,
+                      command=on_ok).pack(side="left", expand=True, padx=(0, 4))
+        ctk.CTkButton(row, text="Batal", fg_color="#666666",
+                      text_color="white", corner_radius=5,
+                      command=on_cancel).pack(side="left", expand=True,
+                                              padx=(4, 0))
+        dialog.wait_window()
+        return out["pin"]
+
+    def toggle_watcher(self):
+        """Tombol Watcher On/Off: tiap klik wajib PIN benar, salah = batal."""
+        pin = self._prompt_pin("Watcher On/Off")
+        if pin is None:
+            return
+        if not check_watcher_pin(self.db_path, pin):
+            messagebox.showwarning("PIN Salah", "PIN salah, status tidak diubah.")
+            return
+        target = not self.watcher_enabled_state()
+        try:
+            if self._watcher is not None:
+                self._watcher.set_enabled(target)
+            else:
+                from src.db import set_watcher_enabled
+                set_watcher_enabled(self.db_path, target)
+        except Exception as e:
+            messagebox.showerror("Gagal", f"Gagal ubah watcher: {e}")
+            return
+        self.refresh()
+
+    def change_pin(self):
+        """Simpan PIN baru (lokal saja, tanpa endpoint remote)."""
+        try:
+            new = self.ent_pin.get().strip()
+        except Exception:
+            return
+        err = validate_new_pin(new)
+        if err:
+            messagebox.showwarning("PIN Invalid", err)
+            return
+        from src.db import set_wipe_pin
+        try:
+            set_wipe_pin(self.db_path, new)
+        except ValueError as e:
+            messagebox.showwarning("PIN Invalid", str(e))
+            return
+        messagebox.showinfo("Selesai", "PIN baru tersimpan.")
+        try:
+            self.ent_pin.delete(0, "end")
+        except Exception:
+            pass
+
     def refresh(self):
         try:
             alive = self.watcher_alive()
         except Exception:
             alive = False
-        self.lbl_watcher.configure(text=f"watcher: {'jalan' if alive else 'mati'}")
+        self.lbl_watcher.configure(
+            text=watcher_status_text(self.watcher_enabled_state(), alive))
         try:
             det = ketoko_detected()
         except Exception:

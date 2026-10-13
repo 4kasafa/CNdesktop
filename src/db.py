@@ -59,6 +59,49 @@ def default_path() -> str:
     return os.path.join(app_dir(), DB_FILE)
 
 
+DEFAULT_WIPE_PIN = "363636"
+
+
+def get_wipe_pin(path: str | None = None) -> str:
+    """PIN hapus/watcher, default 363636. Disimpan di app_meta."""
+    path = path or default_path()
+    with sqlite3.connect(path) as c:
+        c.execute(META_SCHEMA)
+        row = c.execute("SELECT value FROM app_meta WHERE key='wipe_pin'").fetchone()
+        return row[0] if row and row[0] else DEFAULT_WIPE_PIN
+
+
+def set_wipe_pin(path: str, pin: str) -> None:
+    """Simpan PIN 6-digit. Raise ValueError jika format salah."""
+    pin = (pin or "").strip()
+    if not (pin.isdigit() and len(pin) == 6):
+        raise ValueError("PIN harus 6 digit angka.")
+    with sqlite3.connect(path) as c:
+        c.execute(META_SCHEMA)
+        c.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('wipe_pin',?)", (pin,))
+
+
+def get_watcher_enabled(path: str | None = None) -> bool:
+    """Status watcher persist, default aktif (hilang/rusak = True)."""
+    path = path or default_path()
+    try:
+        with sqlite3.connect(path) as c:
+            c.execute(META_SCHEMA)
+            row = c.execute("SELECT value FROM app_meta WHERE key='watcher_enabled'").fetchone()
+            if not row:
+                return True
+            return (row[0] or "1") != "0"
+    except Exception:
+        return True
+
+
+def set_watcher_enabled(path: str, enabled: bool) -> None:
+    with sqlite3.connect(path) as c:
+        c.execute(META_SCHEMA)
+        c.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('watcher_enabled',?)",
+                  ("1" if enabled else "0",))
+
+
 def init_db(path: str | None = None) -> str:
     """Buat/migrasi skema jika perlu. Return path dipakai."""
     path = path or default_path()
@@ -148,3 +191,16 @@ def clear_transactions(path: str, backup: bool = True) -> tuple:
     with sqlite3.connect(path) as c:
         cur = c.execute("DELETE FROM transactions")
         return cur.rowcount, backup_path
+
+
+def wipe_transactions(path: str) -> int:
+    """Hapus SEMUA transactions tanpa backup, reset ID dari 1. Cashiers utuh.
+
+    Return jumlah baris terhapus."""
+    with sqlite3.connect(path) as c:
+        cur = c.execute("DELETE FROM transactions")
+        n = cur.rowcount
+        c.execute("DELETE FROM sqlite_sequence WHERE name='transactions'")
+        c.commit()
+        c.execute("VACUUM")
+        return n

@@ -160,3 +160,69 @@ def test_insert_created_at_eksplisit_verbatim():
     assert list_since(p)[0]["created_at"] == "2026-10-03 17:11:00"
     insert_tx(p, "STAMP2", 9000)  # None -> default skema, bukan verbatim di atas
     assert list_since(p)[1]["created_at"] != "2026-10-03 17:11:00"
+
+
+def test_wipe_delete_tanpa_backup():
+    import glob
+    from src.db import wipe_transactions
+    p = init_db(_tmp())
+    insert_tx(p, "W1", 1000)
+    insert_tx(p, "W2", 2000)
+    d = os.path.dirname(p)
+    before = set(glob.glob(os.path.join(d, "*.bak-*")))
+    assert wipe_transactions(p) == 2
+    assert list_since(p) == []
+    assert set(glob.glob(os.path.join(d, "*.bak-*"))) == before
+
+
+def test_wipe_sequence_reset_dari_1():
+    from src.db import insert_tx, wipe_transactions
+    p = init_db(_tmp())
+    insert_tx(p, "S1", 1000)
+    insert_tx(p, "S2", 2000)
+    wipe_transactions(p)
+    assert insert_tx(p, "S3", 3000) == 1
+
+
+def test_wipe_keep_cashiers_utuh():
+    from src.db import list_cashiers, save_cashier, wipe_transactions
+    p = init_db(_tmp())
+    save_cashier(p, "Surjo", "K01")
+    insert_tx(p, "K1", 1000)
+    n_before = len(list_cashiers(p))
+    wipe_transactions(p)
+    assert len(list_cashiers(p)) == n_before == 1
+
+
+def test_pin_default_363636():
+    from src.db import DEFAULT_WIPE_PIN, get_wipe_pin, set_wipe_pin
+    assert DEFAULT_WIPE_PIN == "363636"
+    p = init_db(_tmp())
+    assert get_wipe_pin(p) == "363636"
+    set_wipe_pin(p, "112233")
+    assert get_wipe_pin(p) == "112233"
+    try:
+        set_wipe_pin(p, "abc")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("PIN invalid harus raise")
+
+
+def test_watcher_persist_ingat_terakhir():
+    from src.db import get_watcher_enabled, set_watcher_enabled
+    p = init_db(_tmp())
+    assert get_watcher_enabled(p) is True  # hilang = default aktif
+    set_watcher_enabled(p, False)
+    assert get_watcher_enabled(p) is False
+    set_watcher_enabled(p, True)
+    assert get_watcher_enabled(p) is True
+
+
+def test_dashboard_button_butuh_pin():
+    from src.dashboard import check_watcher_pin, validate_new_pin
+    p = init_db(_tmp())
+    assert check_watcher_pin(p, "363636") is True  # tiap klik wajib PIN benar
+    assert check_watcher_pin(p, "000000") is False
+    assert validate_new_pin("363636") is None
+    assert validate_new_pin("12") is not None

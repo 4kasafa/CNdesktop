@@ -8,6 +8,15 @@ CNdesktop is a tray-only background app: it reads the Ketoko payment window,
 stores transactions in SQLite, and serves them to one phone over LAN WiFi
 (`http://<PC-IP>:8765`).
 
+## Yang baru di v1.5.0
+
+- Field **Nontunai** di dashboard — masuk Total Penjualan
+  (fisik + nontunai + pengeluaran) dan tercetak di struk.
+- Tombol **Watcher On/Off** di dashboard (admin) + `GET/POST /api/watcher` —
+  tiap toggle wajib PIN 6-digit (default `363636`), ganti via **Simpan PIN**.
+- `POST /api/wipe {pin, confirm:"HAPUS"}` — hapus semua transaksi + log
+  (salah 5x = kunci 5 menit; `409` jika PC sibuk cetak/tulis DB).
+
 ## Requirements
 
 - Windows 10/11 x64 with internet access (once, for download).
@@ -20,7 +29,7 @@ stores transactions in SQLite, and serves them to one phone over LAN WiFi
 Open `cmd` (no admin needed to start) and paste this whole block:
 
 ```bat
-set VER=1.4.0
+set VER=1.5.0
 curl -L -o %TEMP%\CNdesktop.zip "https://github.com/4kasafa/CNdesktop/releases/download/v%VER%/CNdesktop-v%VER%-portable.zip"
 if not exist C:\CNdesktop mkdir C:\CNdesktop
 tar -xf %TEMP%\CNdesktop.zip -C C:\CNdesktop
@@ -65,7 +74,7 @@ tray icon → **Keluar** — because a running EXE is file-locked. Never update
 in the middle of a transaction (no `Pembayaran` dialog open).
 
 ```bat
-set VER=1.4.0
+set VER=1.5.0
 tasklist | findstr /i CNdesktop.exe
 ```
 
@@ -127,6 +136,8 @@ What each line does:
 | `curl` reports 404 | Wrong `VER` — check the version exists under GitHub → Releases |
 | Tray icon missing after start | Old instance still running (`tasklist \| findstr CNdesktop`) — quit it, start again |
 | Phone can't reach `http://<PC-IP>:8765` | WiFi must be **Private**, not Public; re-run `setup_cn.bat` to restore the firewall rule |
+| `403 PIN salah` / `429 terkunci` | PIN default `363636` — cek dashboard admin; 5x salah = tunggu 5 menit |
+| `409 PC sibuk` | Cetak atau tulis DB sedang jalan — coba lagi beberapa detik |
 | Something looks wrong | Open dashboard (double-click tray) → `Buka Log`, or read `%APPDATA%\CNdesktop\logs\cndesktop.log` |
 
 ## For maintainers

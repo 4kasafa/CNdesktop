@@ -567,3 +567,44 @@ def test_tanpa_transisi_tanpa_baca_tanggal():
     w.on_dialog_close(111)
     _run(w, steps=10)
     assert calls == [] and list_since(w.db) == []
+
+def test_paused_no_insert_diabaikan():
+    """paused_no_insert: tick saat mati tak hasilkan INSERT baru."""
+    w = _watcher(nos={"m1": ["9001"]})
+    w.set_enabled(False)
+    assert w.is_enabled() is False
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=10)
+    w.on_dialog_close(111)
+    _run(w, steps=10)
+    assert list_since(w.db) == []
+
+
+def test_deactivate_drain_selesaikan_sisa():
+    """deactivate_drain: sesi kebaca sebelum mati tetap tersimpan."""
+    w = _watcher(nos={"m1": ["Auto", "9001"]})
+    w.on_dialog_open(111, "m1")
+    _run(w, steps=5)
+    w.on_dialog_close(111)
+    w.set_enabled(False)  # mati setelah pending terbentuk
+    _run(w, steps=10)  # drain via tick paused
+    assert len(list_since(w.db)) == 1
+
+
+def test_activate_fresh_abaikan_terlewat():
+    """activate_fresh: sesi/pending saat mati dibuang, tak di-reconcile."""
+    w = _watcher(nos={"m1": ["9001"]})
+    w.set_enabled(False)
+    w.sessions[999] = {"main": "m1", "snap": dict(TUNAI), "last_read": 0.0,
+                       "seen": True, "last_full": 0.0, "born": 0.0, "full_done": True}
+    w.pending = {"snap": dict(TUNAI), "main": "m1", "t": 0.0}
+    w.set_enabled(True)  # fresh: buang terlewat
+    assert w.sessions == {} and w.pending is None
+    assert list_since(w.db) == []
+
+
+def test_allowed_paused_test_manual_tetap_jalan():
+    """test_allowed_paused: baca manual (diagnosa) tetap bisa saat paused."""
+    w = _watcher()
+    w.set_enabled(False)
+    assert w.read_dialog(12345)["total_raw"] != ""  # Test Baca UIA tak diblokir

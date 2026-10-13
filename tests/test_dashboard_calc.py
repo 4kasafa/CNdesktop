@@ -64,6 +64,19 @@ def test_struk_tanpa_sistem():
     assert "Total Penjualan" in t and "Rp 215.000" in t  # fisik+0+expense
 
 
+def test_struk_nontunai_masuk_total():
+    t = _struk(nontunai_amount=50000)
+    assert "Non Tunai" in t and "Rp 50.000" in t
+    assert "Total Penjualan" in t and "Rp 265.000" in t  # 205+50+10
+    assert "TOTAL FISIK" in t and "Rp 205.000" in t  # fisik tetap
+
+
+def test_struk_nontunai_invalid_jadi_nol():
+    t = _struk(nontunai_amount="xx")
+    assert "Non Tunai" in t and "Rp 0" in t
+    assert "Rp 215.000" in t
+
+
 def test_struk_lebar_80_lebih_lebar():
     assert len(_struk(width=48).splitlines()[0]) > len(_struk(width=32).splitlines()[0])
 

@@ -80,7 +80,7 @@ def main():
     threading.Thread(target=watcher.run, daemon=True).start()
 
     def start_api(p):
-        state["server"] = api.start_bg(db_path, p)
+        state["server"] = api.start_bg(db_path, p, watcher=watcher)
 
     start_api(port)
 
@@ -96,7 +96,8 @@ def main():
     dash = Dashboard(
         db_path, port,
         on_port_change=_restart_api,
-        watcher_alive=lambda: watcher._run,
+        watcher_alive=lambda: watcher._run and watcher.is_enabled(),
+        watcher=watcher,
     )
 
     def show_dashboard(icon, item):
