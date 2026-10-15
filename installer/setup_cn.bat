@@ -17,7 +17,11 @@ if not exist "%EXE%" (
     exit /b 1
 )
 
-powershell -NoProfile -Command "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\CNdesktop.lnk');$s.TargetPath='%EXE%';$s.WorkingDirectory='%~dp0';$s.Save()"
+rem Mode: setup_cn.bat (tray default) atau setup_cn.bat headless (tanpa tray-icon).
+set ARGS=
+if /i "%~1"=="headless" set ARGS=--headless
+
+powershell -NoProfile -Command "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\CNdesktop.lnk');$s.TargetPath='%EXE%';$s.Arguments='%ARGS%';$s.WorkingDirectory='%~dp0';$s.Save()"
 netsh advfirewall firewall delete rule name="CNdesktop" >nul 2>&1
 netsh advfirewall firewall add rule name="CNdesktop" dir=in action=allow program="%EXE%" protocol=TCP localport=8765 profile=private
 
@@ -26,4 +30,5 @@ echo Jika muncul Windows Defender Firewall: klik Allow + centang Private.
 echo Pastikan WiFi Private bukan Public (Settings ^> Network).
 echo.
 echo Selesai. Jalankan CNdesktop.exe sekali, cek tray-icon muncul.
+echo Headless (tanpa tray): setup_cn.bat headless, cek via "CNdesktop.exe cnd status".
 pause

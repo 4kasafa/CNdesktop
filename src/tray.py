@@ -1,69 +1,74 @@
-"""Entrypoint tray-only CNdesktop (tanpa console/taskbar, hanya tray-icon).
+"""Entrypoint CNdesktop: tray GUI (default) atau --headless, plus `cnd` CLI.
 
-Menu: Buka Dashboard, Test Baca UIA, Keluar (satu-satunya exit).
-Tooltip: CNdesktop <IP>:<port>. Single-instance via lock file.
-Tanpa-console final via PyInstaller --noconsole (Fase 6); run dev pakai pythonw.
+CNdesktop.exe [--headless] [--port P] | CNdesktop.exe cnd <status|data|...>
+Tanpa-console final via PyInstaller --noconsole; run dev pakai pythonw.
 """
-import logging
-import msvcrt
 import os
-import socket
 import sys
-import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ponytail: dijalankan sebagai file (pythonw src/tray.py) -> ROOT wajib di path
 
-log = logging.getLogger("cndesktop")
+from src.service import (  # ponytail: re-ekspor kompatibel, tanpa GUI
+    acquire_single_instance,
+    lan_ip,
+    lock_path,
+)
+
+__all__ = ["lock_path", "acquire_single_instance", "lan_ip", "main"]
 
 
-def lock_path() -> str:
-    from src.config import LOCK_NAME
-    from src.db import default_path
-    return os.path.join(os.path.dirname(default_path()), LOCK_NAME)
+def _pre_dispatch(argv):
+    """Return 'cli'|'headless'|'tray'. Tanpa import GUI."""
+    if "cnd" in argv[1:]:
+        return "cli"
+    if "--headless" in argv:
+        return "headless"
+    return "tray"
 
 
-def acquire_single_instance():
-    """Return handle terkunci, atau None jika sudah ada instance jalan."""
-    os.makedirs(os.path.dirname(lock_path()), exist_ok=True)
-    fh = open(lock_path(), "w")
+def _cli_args(argv):
+    """Argumen sesudah kata cnd (flag tray sebelum cnd diabaikan mode CLI)."""
+    return argv[argv.index("cnd") + 1:]
+
+
+def _cli_port(argv, default):
+    if "--port" not in argv:
+        return default
     try:
-        msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
-    except OSError:
-        fh.close()
-        return None
-    return fh  # ponytail: tahan handle selama proses hidup
-
-
-def lan_ip() -> str:
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))  # ponytail: tanpa kirim paket, cuma pilih route
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "127.0.0.1"
-
-
-def make_icon_image():
-    from PIL import Image, ImageDraw
-    img = Image.new("RGB", (64, 64), "darkgreen")
-    d = ImageDraw.Draw(img)
-    d.rectangle([8, 20, 56, 44], fill="white")
-    d.text((18, 24), "CN", fill="darkgreen")
-    return img
+        p = int(argv[argv.index("--port") + 1])
+    except (ValueError, IndexError):
+        p = -1
+    if not 1 <= p <= 65535:
+        print("GAGAL: --port harus integer 1-65535", file=sys.stderr)
+        raise SystemExit(2)  # ponytail: typo port = teriak, bukan jalan di port salah
+    return p
 
 
 def main():
-    from src import api
-    from src.config import PORT, VERSION
+    from src.config import PORT
+    mode = _pre_dispatch(sys.argv)
+    if mode == "cli":
+        from src.cli import main as cli_main
+        sys.exit(cli_main(_cli_args(sys.argv)))
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print("pakai: CNdesktop.exe [--headless] [--port P] | CNdesktop.exe cnd <cmd>")
+        print("  cnd status|data|log|port|watcher|wipe|quit|pin  (cnd --help untuk detail)")
+        return
+    if mode == "headless":
+        from src.service import run_headless
+        run_headless(_cli_port(sys.argv, PORT))
+        return
+
+    import logging
+    import threading
+    from src.config import VERSION
     from src.dashboard import Dashboard
-    from src.db import init_db
     from src.log import setup_logging
-    from src.watcher import Watcher
+    from src.service import Service
 
     setup_logging()
+    log = logging.getLogger("cndesktop")
     log.info("start CNdesktop v%s", VERSION)
 
     fh = acquire_single_instance()
@@ -72,32 +77,19 @@ def main():
 
     import pystray
 
-    db_path = init_db()
-    port = PORT
-    state = {"port": port, "server": None}
-
-    watcher = Watcher(db_path=db_path)
-    threading.Thread(target=watcher.run, daemon=True).start()
-
-    def start_api(p):
-        state["server"] = api.start_bg(db_path, p, watcher=watcher)
-
-    start_api(port)
+    svc = Service(port=_cli_port(sys.argv, PORT)).start()
+    svc.run_forever(background=True)
+    port = svc.port
 
     def _restart_api(p):
-        try:
-            state["server"].shutdown()
-        except Exception:
-            pass
-        state["port"] = p
-        start_api(p)
-        icon.title = f"CNdesktop v{VERSION} {lan_ip()}:{p}"
+        svc.restart_port(p)
+        icon.title = f"CNdesktop v{VERSION} {lan_ip()}:{svc.port}"
 
     dash = Dashboard(
-        db_path, port,
+        svc.db_path, port,
         on_port_change=_restart_api,
-        watcher_alive=lambda: watcher._run and watcher.is_enabled(),
-        watcher=watcher,
+        watcher_alive=lambda: svc.watcher._run and svc.watcher.is_enabled(),
+        watcher=svc.watcher,
     )
 
     def show_dashboard(icon, item):
@@ -109,14 +101,13 @@ def main():
 
     def quit_app(icon, item):
         try:
-            watcher.stop()
+            svc.shutdown()
         except Exception:
             pass
         try:
-            state["server"].shutdown()
+            icon.stop()
         except Exception:
             pass
-        icon.stop()
         try:
             dash.root.after(0, dash.root.destroy)
         except Exception:
@@ -124,7 +115,7 @@ def main():
         os._exit(0)  # ponytail: pump pesan watcher ikut mati, tanpa gantung
 
     icon = pystray.Icon(
-        "cndesktop", make_icon_image(),
+        "cndesktop", _make_icon_image(),
         title=f"CNdesktop v{VERSION} {lan_ip()}:{port}",
         menu=pystray.Menu(
             pystray.MenuItem("Buka Dashboard", show_dashboard,
@@ -135,6 +126,20 @@ def main():
     )
     threading.Thread(target=icon.run, daemon=True).start()  # ponytail: Tk wajib main thread
     dash.root.mainloop()
+
+
+def _make_icon_image():
+    from PIL import Image, ImageDraw
+    img = Image.new("RGB", (64, 64), "darkgreen")
+    d = ImageDraw.Draw(img)
+    d.rectangle([8, 20, 56, 44], fill="white")
+    d.text((18, 24), "CN", fill="darkgreen")
+    return img
+
+
+# ponytail: nama lama dipakai test/grep
+def make_icon_image():
+    return _make_icon_image()
 
 
 if __name__ == "__main__":

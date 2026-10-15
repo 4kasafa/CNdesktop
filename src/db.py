@@ -62,6 +62,14 @@ def default_path() -> str:
 DEFAULT_WIPE_PIN = "363636"
 
 
+def validate_pin(pin: str) -> str | None:
+    """Return pesan error, atau None jika PIN 6-digit valid. Lapisan bersama GUI+API."""
+    pin = (pin or "").strip()
+    if not (pin.isdigit() and len(pin) == 6):
+        return "PIN harus 6 digit angka."
+    return None
+
+
 def get_wipe_pin(path: str | None = None) -> str:
     """PIN hapus/watcher, default 363636. Disimpan di app_meta."""
     path = path or default_path()

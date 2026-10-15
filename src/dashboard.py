@@ -137,10 +137,8 @@ def check_watcher_pin(db_path: str, pin: str) -> bool:
 
 def validate_new_pin(pin: str) -> str | None:
     """Return pesan error, atau None jika PIN 6-digit valid. Murni."""
-    pin = (pin or "").strip()
-    if not (pin.isdigit() and len(pin) == 6):
-        return "PIN harus 6 digit angka."
-    return None
+    from src.db import validate_pin
+    return validate_pin(pin)
 
 
 def watcher_status_text(enabled: bool, alive: bool) -> str:

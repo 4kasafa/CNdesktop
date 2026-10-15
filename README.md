@@ -8,6 +8,14 @@ CNdesktop is a tray-only background app: it reads the Ketoko payment window,
 stores transactions in SQLite, and serves them to one phone over LAN WiFi
 (`http://<PC-IP>:8765`).
 
+## Yang baru di v1.6.0
+
+- Mode **headless** (`CNdesktop.exe --headless`, auto-start via
+  `setup_cn.bat headless`) + CLI **`cnd`** dalam 1 exe yang sama:
+  `cnd status/data/log/port/watcher/wipe/quit/pin` (detail: `docs/cnd-remote.md`).
+- Endpoint HP baru: `GET /api/status`, `GET /api/log`,
+  `POST /api/port|pin|shutdown` — PIN ikut kunci 5x/5mnt seperti wipe/watcher.
+
 ## Yang baru di v1.5.0
 
 - Field **Nontunai** di dashboard — masuk Total Penjualan
@@ -29,7 +37,7 @@ stores transactions in SQLite, and serves them to one phone over LAN WiFi
 Open `cmd` (no admin needed to start) and paste this whole block:
 
 ```bat
-set VER=1.5.0
+set VER=1.6.0
 curl -L -o %TEMP%\CNdesktop.zip "https://github.com/4kasafa/CNdesktop/releases/download/v%VER%/CNdesktop-v%VER%-portable.zip"
 if not exist C:\CNdesktop mkdir C:\CNdesktop
 tar -xf %TEMP%\CNdesktop.zip -C C:\CNdesktop
@@ -74,7 +82,7 @@ tray icon → **Keluar** — because a running EXE is file-locked. Never update
 in the middle of a transaction (no `Pembayaran` dialog open).
 
 ```bat
-set VER=1.5.0
+set VER=1.6.0
 tasklist | findstr /i CNdesktop.exe
 ```
 
@@ -138,7 +146,29 @@ What each line does:
 | Phone can't reach `http://<PC-IP>:8765` | WiFi must be **Private**, not Public; re-run `setup_cn.bat` to restore the firewall rule |
 | `403 PIN salah` / `429 terkunci` | PIN default `363636` — cek dashboard admin; 5x salah = tunggu 5 menit |
 | `409 PC sibuk` | Cetak atau tulis DB sedang jalan — coba lagi beberapa detik |
-| Something looks wrong | Open dashboard (double-click tray) → `Buka Log`, or read `%APPDATA%\CNdesktop\logs\cndesktop.log` |
+| Something looks wrong | `CNdesktop.exe cnd log --tail 50`, or read `%APPDATA%\CNdesktop\logs\cndesktop.log` |
+
+## Headless + CLI `cnd` (tanpa tray-icon)
+
+Jalankan `CNdesktop.exe --headless` (auto-start: `setup_cn.bat headless`).
+Cek dari `cmd` di folder install (1 exe, tanpa PATH baru):
+
+```bat
+CNdesktop.exe cnd status
+CNdesktop.exe cnd data --today
+CNdesktop.exe cnd log --tail 50
+CNdesktop.exe cnd port
+CNdesktop.exe cnd watcher off --pin 363636
+CNdesktop.exe cnd quit --pin 363636
+```
+
+Remote HP bertambah: `GET /api/status`, `GET /api/log?pin=&tail=`,
+`POST /api/port {pin,port}`, `POST /api/pin {pin,new_pin}`,
+`POST /api/shutdown {pin}` — PIN ikut kunci 5x/5mnt seperti wipe/watcher.
+
+Rollback headless → tray: jalankan `setup_cn.bat` tanpa argumen
+(shortcut Startup kembali tanpa `--headless`), lalu `cnd quit --pin ...`
+dan start ulang exe.
 
 ## For maintainers
 

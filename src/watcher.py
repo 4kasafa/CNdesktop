@@ -484,6 +484,8 @@ class Watcher:
             elif event in (EV_DESTROY, EV_HIDE) and hwnd in self.sessions:
                 log.info("dialog tutup (hook) hwnd=%s", hwnd)
                 self.on_dialog_close(hwnd)
+        except (KeyboardInterrupt, SystemExit):
+            return  # ponytail: tutup-console paksa = diam, bukan spam ctypes
         except Exception as e:
             log.debug("hook event gagal: %r", e)
 
