@@ -4,26 +4,34 @@ Copy-paste guide for a **plain Windows 10/11 PC** (cashier). No git, no Python,
 no package manager needed. Everything below runs in `cmd` with tools already
 built into Windows (`curl.exe`, `tar.exe`, `netsh`).
 
-CNdesktop is a tray-only background app: it reads the Ketoko payment window,
+CNdesktop is a background app: it reads the Ketoko payment window,
 stores transactions in SQLite, and serves them to one phone over LAN WiFi
-(`http://<PC-IP>:8765`).
+(`http://<PC-IP>:8765`). Two modes: **tray** (icon + dashboard, default)
+and **headless** (no icon, no window) — same EXE, plus a **`cnd`** terminal CLI.
 
-## Yang baru di v1.6.0
+## What's new in v1.6.1
 
-- Mode **headless** (`CNdesktop.exe --headless`, auto-start via
-  `setup_cn.bat headless`) + CLI **`cnd`** dalam 1 exe yang sama:
-  `cnd status/data/log/port/watcher/wipe/quit/pin` (detail: `docs/cnd-remote.md`).
-- Endpoint HP baru: `GET /api/status`, `GET /api/log`,
-  `POST /api/port|pin|shutdown` — PIN ikut kunci 5x/5mnt seperti wipe/watcher.
+- Global `cnd` shim: `setup_cn.bat` installs `C:\Windows\cnd.bat`, so `cnd ...`
+  works from any `cmd` folder (plus `headless` arg now survives the admin UAC hop).
+- Full English README + complete `docs/cnd-remote.md` reference.
 
-## Yang baru di v1.5.0
+## What's new in v1.6.0
 
-- Field **Nontunai** di dashboard — masuk Total Penjualan
-  (fisik + nontunai + pengeluaran) dan tercetak di struk.
-- Tombol **Watcher On/Off** di dashboard (admin) + `GET/POST /api/watcher` —
-  tiap toggle wajib PIN 6-digit (default `363636`), ganti via **Simpan PIN**.
-- `POST /api/wipe {pin, confirm:"HAPUS"}` — hapus semua transaksi + log
-  (salah 5x = kunci 5 menit; `409` jika PC sibuk cetak/tulis DB).
+- **Headless mode** (`CNdesktop.exe --headless`, auto-start via
+  `setup_cn.bat headless`) + **`cnd` CLI** in the same EXE:
+  `cnd status/data/log/port/watcher/wipe/quit/pin` (details: `docs/cnd-remote.md`).
+- New phone endpoints: `GET /api/status`, `GET /api/log`,
+  `POST /api/port|pin|shutdown` — PIN shares the 5-strikes/5-min lockout
+  with wipe/watcher.
+
+## What's new in v1.5.0
+
+- **Nontunai** field in the dashboard — included in Total Sales
+  (cash + non-cash + expenses) and printed on the receipt.
+- **Watcher On/Off** button in the dashboard (admin) + `GET/POST /api/watcher` —
+  every toggle requires the 6-digit PIN (default `363636`, change via **Simpan PIN**.
+- `POST /api/wipe {pin, confirm:"HAPUS"}` — deletes all transactions + logs
+  (5 wrong PINs = 5-minute lockout; `409` while the PC is printing/writing the DB).
 
 ## Requirements
 
@@ -37,7 +45,7 @@ stores transactions in SQLite, and serves them to one phone over LAN WiFi
 Open `cmd` (no admin needed to start) and paste this whole block:
 
 ```bat
-set VER=1.6.0
+set VER=1.6.1
 curl -L -o %TEMP%\CNdesktop.zip "https://github.com/4kasafa/CNdesktop/releases/download/v%VER%/CNdesktop-v%VER%-portable.zip"
 if not exist C:\CNdesktop mkdir C:\CNdesktop
 tar -xf %TEMP%\CNdesktop.zip -C C:\CNdesktop
@@ -54,8 +62,10 @@ What each line does:
 3. `mkdir` — creates the install folder (`if not exist` keeps it re-runnable).
 4. `tar -xf` — extracts the zip (built into Windows, no WinRAR needed).
 5. `setup_cn.bat` — asks for admin once, then creates the Startup shortcut
-   (auto-start on every login) and the firewall rule for TCP port `8765`.
+   (auto-start on every login), the firewall rule for TCP port `8765`,
+   and the global `cnd` shim (so `cnd ...` works from any folder).
    It does **not** start the app — that's the next line.
+   Append `headless` (`setup_cn.bat headless`) for tray-less auto-start.
 6. `start ""` — launches the app (the empty `""` is a required dummy window
    title so the quoted path isn't eaten as the title).
 7. `timeout /t 5` — waits for the app to finish starting (watcher + tray +
@@ -70,24 +80,28 @@ Verify the install:
 
 ```bat
 curl http://127.0.0.1:8765/api/health
+cnd status
 ```
 
-Expected: `{"ok": true}`. A green `CN` tray icon must appear with tooltip
-`CNdesktop v%VER% <PC-IP>:8765`. Double-click it to open the dashboard.
+Expected: `{"ok": true}` and a status report with `version 1.6.0`.
+In tray mode a green `CN` icon appears with tooltip
+`CNdesktop v%VER% <PC-IP>:8765` — double-click it to open the dashboard.
+In headless mode there is no icon; `cnd status` is the check.
 
 ## 2. Update
 
 Same mechanism: overwrite the EXE. **Quit the app first** — right-click the
-tray icon → **Keluar** — because a running EXE is file-locked. Never update
-in the middle of a transaction (no `Pembayaran` dialog open).
+tray icon → **Keluar**, or `cnd quit --pin <PIN>` — because a running EXE is
+file-locked. Never update in the middle of a transaction
+(no `Pembayaran` dialog open).
 
 ```bat
-set VER=1.6.0
+set VER=1.6.1
 tasklist | findstr /i CNdesktop.exe
 ```
 
-If the line above still lists `CNdesktop.exe`, quit via tray and repeat until
-it prints nothing. Then:
+If the line above still lists `CNdesktop.exe`, quit (tray or `cnd quit`)
+and repeat until it prints nothing. Then:
 
 ```bat
 copy C:\CNdesktop\CNdesktop.exe C:\CNdesktop\CNdesktop.exe.bak
@@ -99,13 +113,15 @@ curl http://127.0.0.1:8765/api/health
 
 Notes:
 
-- `setup_cn.bat` does **not** need re-running (shortcut + firewall already
-  point at the same path). Re-run it only if you moved the folder.
+- `setup_cn.bat` does **not** need re-running (shortcut + firewall + shim already
+  point at the same paths). Re-run it only if you moved the folder
+  (re-run with `headless` if that was your mode).
 - The backup (`.bak`) and database (`%APPDATA%\CNdesktop\data.db`) are untouched,
   so transactions and logs survive the update.
-- Verify: health returns `{"ok": true}` and the tray tooltip shows the new version.
+- Verify: health returns `{"ok": true}` and `cnd status` shows the new version
+  (tray tooltip in tray mode).
 
-Rollback (if the new version misbehaves) — quit via tray first, then:
+Rollback (if the new version misbehaves) — quit first (tray or `cnd quit`), then:
 
 ```bat
 del C:\CNdesktop\CNdesktop.exe
@@ -115,12 +131,14 @@ start "" "C:\CNdesktop\CNdesktop.exe"
 
 ## 3. Uninstall (full wipe)
 
-Run `cmd` **as administrator**. Prefer quitting via tray → **Keluar**
-(clean shutdown flushes the database); `taskkill` below is the fallback.
+Run `cmd` **as administrator**. Prefer quitting cleanly first
+(tray → **Keluar**, or `cnd quit --pin <PIN>`);
+`taskkill` below is the fallback.
 
 ```bat
 taskkill /F /IM CNdesktop.exe
 del "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\CNdesktop.lnk"
+del C:\Windows\cnd.bat
 netsh advfirewall firewall delete rule name="CNdesktop"
 rmdir /S /Q C:\CNdesktop
 rmdir /S /Q %APPDATA%\CNdesktop
@@ -130,9 +148,10 @@ What each line does:
 
 1. `taskkill` — force-stops the app if tray-quit was skipped.
 2. `del ... StartUp\CNdesktop.lnk` — removes auto-start on login.
-3. `netsh ... delete rule` — removes the firewall exception for port `8765`.
-4. `rmdir C:\CNdesktop` — removes the program files.
-5. `rmdir %APPDATA%\CNdesktop` — removes transactions (`data.db`), logs,
+3. `del C:\Windows\cnd.bat` — removes the global `cnd` shim.
+4. `netsh ... delete rule` — removes the firewall exception for port `8765`.
+5. `rmdir C:\CNdesktop` — removes the program files.
+6. `rmdir %APPDATA%\CNdesktop` — removes transactions (`data.db`), logs,
    and the lock file. **This deletes sales history** — back up `data.db`
    first if you need it.
 
@@ -144,31 +163,41 @@ What each line does:
 | `curl` reports 404 | Wrong `VER` — check the version exists under GitHub → Releases |
 | Tray icon missing after start | Old instance still running (`tasklist \| findstr CNdesktop`) — quit it, start again |
 | Phone can't reach `http://<PC-IP>:8765` | WiFi must be **Private**, not Public; re-run `setup_cn.bat` to restore the firewall rule |
-| `403 PIN salah` / `429 terkunci` | PIN default `363636` — cek dashboard admin; 5x salah = tunggu 5 menit |
-| `409 PC sibuk` | Cetak atau tulis DB sedang jalan — coba lagi beberapa detik |
-| Something looks wrong | `CNdesktop.exe cnd log --tail 50`, or read `%APPDATA%\CNdesktop\logs\cndesktop.log` |
+| `403 PIN salah` / `429 terkunci` | Default PIN `363636` — see dashboard admin; 5 wrong PINs = wait 5 minutes |
+| `409 PC sibuk` | Printing or a DB write is in progress — retry in a few seconds |
+| Something looks wrong | `cnd log --tail 50`, or read `%APPDATA%\CNdesktop\logs\cndesktop.log` |
+| `cnd status` shows `?`/`None` everywhere | Old server without `/api/status` is holding the port — quit it, start v1.6.0 |
 
-## Headless + CLI `cnd` (tanpa tray-icon)
+## Headless + CLI `cnd` (no tray icon)
 
-Jalankan `CNdesktop.exe --headless` (auto-start: `setup_cn.bat headless`).
-Cek dari `cmd` di folder install (1 exe, tanpa PATH baru):
+Run `CNdesktop.exe --headless` (auto-start: `setup_cn.bat headless`).
+After setup, `cnd ...` works from any `cmd` folder (global shim).
+`cnd data` / `cnd log` read files directly and work even when the service
+is down; everything else talks to the local HTTP server.
 
 ```bat
-CNdesktop.exe cnd status
-CNdesktop.exe cnd data --today
-CNdesktop.exe cnd log --tail 50
-CNdesktop.exe cnd port
-CNdesktop.exe cnd watcher off --pin 363636
-CNdesktop.exe cnd quit --pin 363636
+cnd status                          # health + watcher + last receipt + today's count
+cnd data --today                    # today's transactions (add --since N, --limit N)
+cnd log --tail 50                   # last 50 log lines
+cnd port                            # show port; `cnd port 8765 --pin 363636` to change
+cnd watcher                         # show state; `cnd watcher off --pin 363636` to pause
+cnd wipe --pin 363636 --confirm HAPUS   # delete ALL transactions + logs (no backup!)
+cnd quit --pin 363636               # clean shutdown (replaces tray Keluar)
+cnd pin --pin 363636 --new-pin 654321  # change PIN (6 digits)
 ```
 
-Remote HP bertambah: `GET /api/status`, `GET /api/log?pin=&tail=`,
-`POST /api/port {pin,port}`, `POST /api/pin {pin,new_pin}`,
-`POST /api/shutdown {pin}` — PIN ikut kunci 5x/5mnt seperti wipe/watcher.
+Flags: `--host` (default `127.0.0.1`), `--port` (default `8765`),
+`--db <path>`, `--json` (machine-readable output, before or after the command).
+Exit codes: `0` ok, `1` failed (e.g. wrong PIN, offline server), `2` usage error.
 
-Rollback headless → tray: jalankan `setup_cn.bat` tanpa argumen
-(shortcut Startup kembali tanpa `--headless`), lalu `cnd quit --pin ...`
-dan start ulang exe.
+New phone endpoints: `GET /api/status`, `GET /api/log?pin=&tail=`,
+`POST /api/port {pin,port}`, `POST /api/pin {pin,new_pin}`,
+`POST /api/shutdown {pin}` — PIN shares the 5-strikes/5-min lockout
+with wipe/watcher. Full contract: `docs/cnd-remote.md`.
+
+Rollback headless → tray: run `setup_cn.bat` without arguments
+(the Startup shortcut loses `--headless`), then
+`cnd quit --pin ...` and start the EXE again.
 
 ## For maintainers
 

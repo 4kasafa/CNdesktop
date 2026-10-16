@@ -6,7 +6,7 @@ rem Butuh admin sekali (UAC) untuk Startup semua-user + firewall rule.
 net session >nul 2>&1
 if %errorlevel% neq 0 (
     echo Meminta hak admin...
-    powershell -NoProfile -Command "Start-Process '%~f0' -Verb RunAs"
+    powershell -NoProfile -Command "Start-Process '%~f0' -ArgumentList '%*' -Verb RunAs"
     exit /b
 )
 
@@ -25,10 +25,14 @@ powershell -NoProfile -Command "$s=(New-Object -ComObject WScript.Shell).CreateS
 netsh advfirewall firewall delete rule name="CNdesktop" >nul 2>&1
 netsh advfirewall firewall add rule name="CNdesktop" dir=in action=allow program="%EXE%" protocol=TCP localport=8765 profile=private
 
+rem Shim global: ketik `cnd ...` dari cmd mana saja (C:\Windows sudah di PATH sistem).
+echo @"%EXE%" cnd %%* > "C:\Windows\cnd.bat"
+if %errorlevel% neq 0 echo PERINGATAN: shim cnd gagal ditulis.
+
 echo.
 echo Jika muncul Windows Defender Firewall: klik Allow + centang Private.
 echo Pastikan WiFi Private bukan Public (Settings ^> Network).
 echo.
 echo Selesai. Jalankan CNdesktop.exe sekali, cek tray-icon muncul.
-echo Headless (tanpa tray): setup_cn.bat headless, cek via "CNdesktop.exe cnd status".
+echo Headless (tanpa tray): setup_cn.bat headless, cek via "cnd status".
 pause
