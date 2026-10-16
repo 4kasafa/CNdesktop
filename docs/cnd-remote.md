@@ -1,13 +1,15 @@
-# CNdesktop remote + CLI reference (v1.6.0)
+# CNdesktop remote + CLI reference (v1.6.2)
 
 Contract owned by the PC side; the phone side must not reinterpret it.
 Default PIN `363636` (change via dashboard or `POST /api/pin`).
 Combined lockout for every PIN action: 5 consecutive wrong PINs → `429`
 locked for 5 minutes; a correct PIN resets the counter.
 
-Base URL: `http://<PC-IP>:8765`. `cnd` below means the global shim
-(`setup_cn.bat` installs it); without the shim use
-`CNdesktop.exe cnd ...` from the install folder.
+Base URL: `http://<PC-IP>:8765`. `cnd` below means `cnd.exe`
+(the console companion; `setup_cn.bat` installs it plus a global shim,
+so `cnd ...` works from any folder). NOTE: `CNdesktop.exe` is windowed —
+`CNdesktop.exe cnd ...` output only appears via pipe/file redirect,
+never directly on a `cmd` screen. Always use `cnd.exe` interactively.
 
 ## Version matrix
 

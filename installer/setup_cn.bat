@@ -17,16 +17,24 @@ if not exist "%EXE%" (
     exit /b 1
 )
 
-rem Mode: setup_cn.bat (tray default) atau setup_cn.bat headless (tanpa tray-icon).
+rem Mode: setup_cn.bat [headless] (tanpa tray-icon). Tulis `headless`
+rem polos atau `--headless`, keduanya diterima.
+set ARGS=
 set ARGS=
 if /i "%~1"=="headless" set ARGS=--headless
+if /i "%~1"=="--headless" set ARGS=--headless
 
 powershell -NoProfile -Command "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\CNdesktop.lnk');$s.TargetPath='%EXE%';$s.Arguments='%ARGS%';$s.WorkingDirectory='%~dp0';$s.Save()"
 netsh advfirewall firewall delete rule name="CNdesktop" >nul 2>&1
 netsh advfirewall firewall add rule name="CNdesktop" dir=in action=allow program="%EXE%" protocol=TCP localport=8765 profile=private
 
 rem Shim global: ketik `cnd ...` dari cmd mana saja (C:\Windows sudah di PATH sistem).
-echo @"%EXE%" cnd %%* > "C:\Windows\cnd.bat"
+rem cnd.exe console diteruskan langsung (tampil di layar); fallback ke exe utama bila hilang.
+if exist "%~dp0cnd.exe" (
+    echo @"%~dp0cnd.exe" %%* > "C:\Windows\cnd.bat"
+) else (
+    echo @"%EXE%" cnd %%* > "C:\Windows\cnd.bat"
+)
 if %errorlevel% neq 0 echo PERINGATAN: shim cnd gagal ditulis.
 
 echo.

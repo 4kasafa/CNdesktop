@@ -9,6 +9,12 @@ stores transactions in SQLite, and serves them to one phone over LAN WiFi
 (`http://<PC-IP>:8765`). Two modes: **tray** (icon + dashboard, default)
 and **headless** (no icon, no window) — same EXE, plus a **`cnd`** terminal CLI.
 
+## What's new in v1.6.2
+
+- **`cnd.exe` console companion**: `CNdesktop.exe` is windowed, so its CLI
+  output never reaches a `cmd` screen — `cnd.exe` (same commands) always does.
+  The portable zip and `setup_cn.bat` now ship it; the global shim points there.
+
 ## What's new in v1.6.1
 
 - Global `cnd` shim: `setup_cn.bat` installs `C:\Windows\cnd.bat`, so `cnd ...`
@@ -45,7 +51,7 @@ and **headless** (no icon, no window) — same EXE, plus a **`cnd`** terminal CL
 Open `cmd` (no admin needed to start) and paste this whole block:
 
 ```bat
-set VER=1.6.1
+set VER=1.6.2
 curl -L -o %TEMP%\CNdesktop.zip "https://github.com/4kasafa/CNdesktop/releases/download/v%VER%/CNdesktop-v%VER%-portable.zip"
 if not exist C:\CNdesktop mkdir C:\CNdesktop
 tar -xf %TEMP%\CNdesktop.zip -C C:\CNdesktop
@@ -96,7 +102,7 @@ file-locked. Never update in the middle of a transaction
 (no `Pembayaran` dialog open).
 
 ```bat
-set VER=1.6.1
+set VER=1.6.2
 tasklist | findstr /i CNdesktop.exe
 ```
 
