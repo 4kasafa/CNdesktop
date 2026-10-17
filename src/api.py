@@ -338,6 +338,7 @@ def _status_obj(h) -> dict:
         except Exception:
             pass
     from src.config import PORT, VERSION
+    from src.service import lan_ip
     try:
         enabled = h.watcher.is_enabled() if h.watcher is not None \
             else get_watcher_enabled(h.db_path)
@@ -353,9 +354,11 @@ def _status_obj(h) -> dict:
     except Exception:
         busy = False
     last, today = _db_stats(h.db_path) if getattr(h, "db_path", "") else ("-", 0)
-    return {"version": VERSION, "port": PORT, "watcher_enabled": bool(enabled),
-            "watcher_alive": bool(alive), "db_busy": bool(busy),
-            "ketoko": False, "last_no": last, "count_today": today, "uptime_s": 0.0}
+    return {"version": VERSION, "ip": lan_ip(),
+            "port": getattr(h.server, "server_port", PORT),
+            "watcher_enabled": bool(enabled), "watcher_alive": bool(alive),
+            "db_busy": bool(busy), "ketoko": False, "last_no": last,
+            "count_today": today, "uptime_s": 0.0}
 
 
 def _read_log_tail(tail: int) -> list[str]:

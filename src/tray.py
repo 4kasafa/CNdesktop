@@ -53,7 +53,7 @@ def main():
         sys.exit(cli_main(_cli_args(sys.argv)))
     if "--help" in sys.argv or "-h" in sys.argv:
         print("pakai: CNdesktop.exe [--headless] [--port P] | CNdesktop.exe cnd <cmd>")
-        print("  cnd status|data|log|port|watcher|wipe|quit|pin  (cnd --help untuk detail)")
+        print("  cnd status|data|log|port|watcher|wipe|quit|pin|qr  (cnd --help untuk detail)")
         return
     if mode == "headless":
         from src.service import run_headless

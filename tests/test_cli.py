@@ -179,3 +179,44 @@ def test_cli_status_dan_watcher(capsys):
     finally:
         srv.shutdown()
         reset_pin_lockout()
+
+
+def test_qr_lines():
+    from src.cli import _qr_lines
+    ls = _qr_lines([[1, 0], [0, 1]])
+    assert len(ls) == 5 and all(len(ln) == 10 for ln in ls)
+    assert ls == [" " * 10] * 2 + ["    \u2580\u2584    "] + [" " * 10] * 2
+
+
+def test_cli_qr_integrasi(capsys):
+    base, db, srv = _srv()
+    try:
+        port = str(srv.server_port)
+        assert main(["--port", port, "qr"]) == 0
+        out = capsys.readouterr().out
+        assert "http://" in out and f":{port}" in out
+        assert any(c in out for c in "\u2588\u2580\u2584")
+        assert "\x1b" not in out  # non-tty -> tanpa escape
+    finally:
+        srv.shutdown()
+        reset_pin_lockout()
+
+
+def test_cli_qr_json(capsys):
+    base, db, srv = _srv()
+    try:
+        port = str(srv.server_port)
+        assert main(["--port", port, "qr", "--json"]) == 0
+        out = capsys.readouterr().out
+        d = json.loads(out)
+        assert set(d) == {"url"}
+        assert d["url"].startswith("http://") and d["url"].endswith(f":{port}")
+        assert not any(c in out for c in "\u2588\u2580\u2584")
+    finally:
+        srv.shutdown()
+        reset_pin_lockout()
+
+
+def test_cli_qr_server_mati(capsys):
+    assert main(["--port", "59999", "qr"]) == 1
+    assert "GAGAL" in capsys.readouterr().err

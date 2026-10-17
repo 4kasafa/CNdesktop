@@ -1,4 +1,4 @@
-# CNdesktop remote + CLI reference (v1.6.2)
+# CNdesktop remote + CLI reference (v1.7.0)
 
 Contract owned by the PC side; the phone side must not reinterpret it.
 Default PIN `363636` (change via dashboard or `POST /api/pin`).
@@ -18,6 +18,7 @@ never directly on a `cmd` screen. Always use `cnd.exe` interactively.
 | v1.4.0 | `GET /api/transactions`, `POST /api/print`, `GET /api/health` |
 | v1.5.0 | `GET/POST /api/watcher`, `POST /api/wipe` |
 | v1.6.0 | `GET /api/status`, `GET /api/log`, `POST /api/port\|pin\|shutdown`, `cnd` CLI, `--headless` |
+| v1.7.0 | `cnd qr` (QR URL LAN di terminal, `--json`); `/api/status` fallback kini punya `ip` + port bind aktual |
 
 Older servers answer unknown paths with `404 {"error":"not found"}`.
 `cnd status` against an old server falls back to `/api/health` and shows
@@ -110,6 +111,7 @@ service is down. Everything else needs the local HTTP server.
 | `cnd wipe --pin P --confirm HAPUS` | server+PIN | Delete ALL transactions + logs, no backup |
 | `cnd quit [--pin P]` (alias `shutdown`) | server+PIN | Clean shutdown |
 | `cnd pin --pin OLD --new-pin NEW` | server+PIN | Change PIN (6 digits) |
+| `cnd qr [--json]` | server | QR URL LAN (`http://IP:PORT`) di terminal, untuk scan HP |
 
 Global flags (before or after the command): `--host` (default `127.0.0.1`),
 `--port` (default `8765`, explicit `1`–`65535` or exit 2), `--db <path>`
@@ -123,6 +125,7 @@ Examples:
 cnd status --json
 cnd data --today --json
 cnd log --tail 50
+cnd qr
 cnd port 8765 --pin 363636
 cnd watcher off --pin 363636
 cnd quit --pin 363636

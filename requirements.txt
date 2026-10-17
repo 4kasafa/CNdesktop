@@ -1,5 +1,6 @@
 uiautomation
 pystray
+segno  # cnd qr: QR code murni-python tanpa dependency
 customtkinter  # dashboard calculate ala cash_note
 pywin32  # win32print cetak struk (guarded import, Windows saja)
 pyinstaller  # build-only (Fase 6: CNdesktop.exe windowed)

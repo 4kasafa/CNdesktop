@@ -10,16 +10,15 @@ stores transactions in SQLite, and serves them to one phone over LAN WiFi
 no window, driven from the terminal) and **tray** (green `CN` icon +
 dashboard) — and ships a terminal CLI, **`cnd`**.
 
-## What's new in v1.6.2
+## What's new in v1.7.0
 
-- **`cnd.exe` console companion** — same commands as the CLI, built as a
-  console app so its output always shows on a `cmd` screen.
-- **Global `cnd` shim** — `setup_cn.bat` installs `C:\Windows\cnd.bat`, so
-  `cnd ...` works from any folder.
-- **Headless mode** with logon auto-start (`setup_cn.bat headless`).
-- New phone endpoints: `GET /api/status`, `GET /api/log`,
-  `POST /api/port|pin|shutdown` — the PIN shares the 5-strikes/5-min
-  lockout with wipe/watcher.
+- **`cnd qr`** — prints a scannable QR with the LAN URL
+  (`http://<PC-IP>:8765`) straight in the terminal, so the phone can scan
+  and connect. `cnd qr --json` prints `{"url": "http://<PC-IP>:8765"}`
+  instead. Standard black-on-white QR in Windows 10/11 console.
+- `GET /api/status` fallback now reports the real `ip` and the actually
+  bound port (previously missing / always the default), keeping
+  `cnd status` and `cnd qr` accurate.
 
 ## Requirements
 
@@ -33,7 +32,7 @@ dashboard) — and ships a terminal CLI, **`cnd`**.
 Open `cmd` (no admin needed to start) and paste this whole block:
 
 ```bat
-set VER=1.6.2
+set VER=1.7.0
 curl -L -o %TEMP%\CNdesktop.zip "https://github.com/4kasafa/CNdesktop/releases/download/v%VER%/CNdesktop-v%VER%-portable.zip"
 if not exist C:\CNdesktop mkdir C:\CNdesktop
 tar -xf %TEMP%\CNdesktop.zip -C C:\CNdesktop
@@ -96,6 +95,7 @@ Mode notes:
 cnd status                          # health + watcher + last receipt + today's count
 cnd data --today                    # today's transactions (add --since N, --limit N)
 cnd log --tail 50                   # last 50 log lines
+cnd qr                              # tampilkan QR URL LAN untuk scan dari HP
 cnd port                            # show port; `cnd port 8765 --pin 363636` to change
 cnd watcher                         # show state; `cnd watcher off --pin 363636` to pause
 cnd wipe --pin 363636 --confirm HAPUS   # delete ALL transactions + logs (no backup!)
@@ -124,7 +124,7 @@ file-locked. Never update in the middle of a transaction (no `Pembayaran`
 dialog open).
 
 ```bat
-set VER=1.6.2
+set VER=1.7.0
 cnd quit --pin 363636
 tasklist | findstr /i CNdesktop.exe
 ```
@@ -139,12 +139,16 @@ curl -L -o %TEMP%\CNdesktop.zip "https://github.com/4kasafa/CNdesktop/releases/d
 tar -xf %TEMP%\CNdesktop.zip -C C:\CNdesktop
 start "" "C:\CNdesktop\CNdesktop.exe" --headless
 cnd status
+cnd qr
 ```
 
 Notes:
 
 - **Both EXEs are backed up**, because the `cnd` shim points at `cnd.exe` —
   if it doesn't arrive, `cnd` breaks.
+- After the update, `cnd qr` must print a QR. If it answers
+  `invalid choice: 'qr'`, the old `cnd.exe` is still in place — quit the app
+  and re-run the `tar -xf` line from the Update block.
 - Tray mode: use `start "" "C:\CNdesktop\CNdesktop.exe"` instead. The
   Startup shortcut already carries your mode; the `start` line only affects
   the current session.
@@ -203,6 +207,7 @@ What each line does:
 | `403 PIN salah` / `429 terkunci` | Default PIN `363636`; 5 wrong PINs = wait 5 minutes |
 | `409 PC sibuk` | Printing or a DB write is in progress — retry in a few seconds |
 | `cnd status` shows `?`/`None` everywhere | Old server without `/api/status` holds the port — quit it, start the current release |
+| `cnd qr` says `invalid choice: 'qr'` | Old `cnd.exe` still installed — re-run the Update block's `tar -xf` line (app quit) |
 | Something looks wrong | `cnd log --tail 50`, or read `%APPDATA%\CNdesktop\logs\cndesktop.log` |
 
 ## For maintainers

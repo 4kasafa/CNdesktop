@@ -1,6 +1,6 @@
 """CLI lokal `cnd`: cek data/log via file langsung, kontrol via HTTP localhost.
 
-Dipakai: CNdesktop.exe cnd status|data|log|port|watcher|wipe|quit|pin.
+Dipakai: CNdesktop.exe cnd status|data|log|port|watcher|wipe|quit|pin|qr.
 Stdlib saja. data/log jalan walau service mati; kontrol butuh service jalan.
 """
 import argparse
@@ -54,6 +54,37 @@ def _fail(code, body):
     err = body.get("error", body) if isinstance(body, dict) else body
     print(f"GAGAL {code}: {err}", file=sys.stderr)
     return 1
+
+
+def _enable_vt():
+    """Aktifkan ANSI/VT di console Windows (untuk reverse-video QR)."""
+    try:
+        if not sys.stdout.isatty():
+            return False
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if not k.GetConsoleMode(h, ctypes.byref(mode)):
+            return False
+        return bool(k.SetConsoleMode(h, mode.value | 0x0004))
+    except Exception:
+        return False
+
+
+def _qr_lines(matrix):
+    """Matriks QR 0/1 -> baris half-block, quiet zone 4 modul semua sisi."""
+    rows = [list(r) for r in matrix]
+    pad = [0] * (len(rows[0]) + 8)
+    grid = [pad] * 4 + [[0] * 4 + r + [0] * 4 for r in rows] + [pad] * 4
+    if len(grid) % 2:
+        grid.append([0] * len(grid[0]))
+    out = []
+    for i in range(0, len(grid), 2):
+        top, bot = grid[i], grid[i + 1]
+        out.append("".join("\u2588" if t and b else "\u2580" if t
+                           else "\u2584" if b else " " for t, b in zip(top, bot)))
+    return out
 
 
 def _db_connect(path, retries=5):
@@ -245,6 +276,32 @@ def cmd_pin(a):
     return 0
 
 
+def cmd_qr(a):
+    code, body = _get(_base(a.host, a.port), "/api/status")
+    if code != 200:
+        return _fail(code, body)
+    if not body.get("ip"):
+        return _fail(code, {"error": "status tanpa field ip (server lama?), update PC"})
+    url = f"http://{body['ip']}:{body.get('port', a.port)}"
+    if a.json:
+        print(json.dumps({"url": url}))
+        return 0
+    import segno  # ponytail: lazy agar command lain tetap stdlib-only
+    lines = _qr_lines(segno.make(url, error="q").matrix)
+    try:  # ponytail: pipe cp1252 tak boleh crash; console asli (WriteConsoleW) aman
+        sys.stdout.reconfigure(errors="replace")
+    except Exception:
+        pass
+    if _enable_vt():
+        for ln in lines:
+            print(f"\x1b[7m{ln}\x1b[0m")
+    else:
+        for ln in lines:
+            print(ln)
+    print(url)
+    return 0
+
+
 def build_parser():
     from src.config import PORT
     p = argparse.ArgumentParser(prog="cnd", description="Kontrol CNdesktop via terminal")
@@ -282,6 +339,8 @@ def build_parser():
     pn.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     pn.add_argument("--pin", default="")
     pn.add_argument("--new-pin", default="")
+    qr = sub.add_parser("qr")
+    qr.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     return p
 
 
@@ -291,7 +350,8 @@ def main(argv=None):
         a.json = False  # ponytail: global+sub --json SUPPRESS, absen = False
     fn = {"status": cmd_status, "data": cmd_data, "log": cmd_log,
           "port": cmd_port, "watcher": cmd_watcher, "wipe": cmd_wipe,
-          "quit": cmd_quit, "shutdown": cmd_quit, "pin": cmd_pin}[a.cmd]
+          "quit": cmd_quit, "shutdown": cmd_quit, "pin": cmd_pin,
+          "qr": cmd_qr}[a.cmd]
     return fn(a)
 
 
